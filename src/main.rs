@@ -1,70 +1,91 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc, mpsc::{Sender, Receiver}};
 use std::thread;
+use std::thread::{JoinHandle};
+use std::ops::Range;
+use std::iter::Iterator;
 
-const MAX_X: u64 = 1_000;
-const BUFFER_SIZE: usize = 1_000_000;
+const MAX_X: u64 = 800;
+const NUM_THREADS: usize = 8;
 
-fn main() {
-    let iter = (2..MAX_X).map(|x| x * x).filter(|&x| x % 24 == 1)
-        .flat_map(move |x| (2..x / 24).map(|y| 24 * y)
-            .flat_map(move |y| (2..(x - y) / 24).map(|z| z * 24).filter(move |&z| z != y)
-                .map(move |z| (x, y, z))));
-    let arc_mut_iter = Arc::new(Mutex::new(iter));
-    let mut handles = Vec::new();
-    let main_start = std::time::SystemTime::now();
-    for i in 0..3 {
-        let am_iter = Arc::clone(&arc_mut_iter);
-        let builder = thread::Builder::new().stack_size(24 * BUFFER_SIZE);
-        let test_handle = builder.spawn(move || {
-            let mut internal_buffer: [(u64, u64, u64); BUFFER_SIZE] =
-                [(0, 0, 0); BUFFER_SIZE];
-            let mut rerun = false;
-            'thread_loop: loop {
-                {
-                    let mut t_iter = am_iter.lock().unwrap();
-                    //println!("({}) Starting to pull numbers from the iterator.", i);
-                    //let start = std::time::SystemTime::now();
-                    for pos in 0..BUFFER_SIZE {
-                        internal_buffer[pos] = if let Some(trip) = t_iter.next() {
-                            trip
-                        } else {
-                            //println!("Breaking for loop!");
-                            //println!("Time taken before break: {:?}", start.elapsed().unwrap());
-                            rerun = true;
-                            break 'thread_loop;
+struct TesterThreadBuilder {
+    inst_channel: Receiver<u8>,
+    res_channel: Sender<TTResult>
+}
+
+#[derive(Debug)]
+enum TTResult {
+    Solution((u64, u64, u64)),
+    At((u64, u64, u64))
+}
+
+impl TesterThreadBuilder {
+    fn new(ic: Receiver<u8>, rsc: Sender<TTResult>) -> TesterThreadBuilder {
+        TesterThreadBuilder {
+            inst_channel: ic,
+            res_channel: rsc
+        }
+    }
+}
+
+macro_rules! spawn_tester_thread {
+    ($ttb:ident, $arc_mutex_iterator:ident, $t_no:ident) => {
+        thread::spawn(move || {
+            'main_loop: loop {
+                let x = {
+                    let mut tmp = $arc_mutex_iterator.lock().unwrap();
+                    if let Some(num) = tmp.next() {
+                        num
+                    } else {
+                        break 'main_loop;
+                    }
+                };
+                for y in (2..x / 24).map(|y| y * 24) {
+                    for z in (2..(x - y) / 24).map(|z| z * 24).take_while(|&z| z != y) {
+                        if let Ok(num) = $ttb.inst_channel.try_recv() {
+                            match num {
+                                0 => $ttb.res_channel.send(TTResult::At((x, y, z))).unwrap(),
+                                1 => 'pause: loop {
+                                    match $ttb.inst_channel.try_recv() {
+                                        Ok(0) => $ttb.res_channel.send(TTResult::At((x, y, z)))
+                                            .unwrap(),
+                                        Ok(2) => break 'pause,
+                                        _ => {}
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        if test_squares(x, y, z) {
+                            $ttb.res_channel.send(TTResult::Solution((x, y, z))).unwrap();
                         }
                     }
-                    //println!("({}) Refilled the buffer with data. Time taken: {:?}", i,
-                    //         start.elapsed().unwrap());
                 }
-                //println!("({}) Starting to test data.", i);
-                //let test_start = std::time::SystemTime::now();
-                for trip in internal_buffer.iter() {
-                    if test_squares(trip.0, trip.1, trip.2) {
-                        println!("haha what the fuck? {:?}", trip);
-                    }
-                }
-                //println!("({}) Completed testing. Time taken: {:?}", i,
-                //         test_start.elapsed().unwrap());
             }
-            if rerun {
-                //println!("({}) [Final!] Starting to test data.", i);
-                //let test_start = std::time::SystemTime::now();
-                for trip in internal_buffer.iter() {
-                    if test_squares(trip.0, trip.1, trip.2) {
-                        println!("haha what the fuck? {:?}", trip);
-                    }
-                }
-                //println!("({}) [Final!] Completed testing. Time taken: {:?}", i,
-                //         test_start.elapsed().unwrap());
-            }
-        }).unwrap();
-        handles.push(test_handle);
+        })
+    };
+}
+
+fn main() {
+    let mut handles = Vec::new();
+    let mut inst_senders = Vec::new();
+    let mut res_receivers = Vec::new();
+    let am_iter = Arc::new(Mutex::new((2..MAX_X).map(|x| x * x).filter(|&x| x % 24 == 1)));
+    for i in 0..NUM_THREADS {
+        let (inst_sender, inst_receiver): (Sender<u8>, Receiver<u8>) = mpsc::channel();
+        let (res_sender, res_receiver): (Sender<TTResult>, Receiver<TTResult>) = mpsc::channel();
+        let tt = TesterThreadBuilder::new(inst_receiver, res_sender);
+        let am_ref = Arc::clone(&am_iter);
+        handles.push(spawn_tester_thread!(tt, am_ref, i));
+        inst_senders.push(inst_sender);
+        res_receivers.push(res_receiver);
     }
+    println!("Constructed testing threads.");
+    let total_time = std::time::Instant::now();
     for handle in handles {
         handle.join().unwrap();
     }
-    println!("Total time: {:?}", main_start.elapsed().unwrap());
+    println!("Total time: {:?}", total_time.elapsed());
+    println!("Exiting.");
 }
 
 // Using method found on SE
