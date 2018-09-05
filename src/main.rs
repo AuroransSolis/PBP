@@ -1,11 +1,9 @@
 use std::sync::{Arc, Mutex, mpsc, mpsc::{Sender, Receiver}};
 use std::thread;
-use std::thread::{JoinHandle};
-use std::ops::Range;
 use std::iter::Iterator;
 
-const MAX_X: u64 = 2500;
-const NUM_THREADS: usize = 4;
+const MAX_X: u64 = 750;
+const NUM_THREADS: usize = 8;
 
 struct TesterThreadBuilder {
     inst_channel: Receiver<u8>,
@@ -61,11 +59,13 @@ macro_rules! spawn_tester_thread {
                     }
                 }
             }
+            println!("({}) Completed execution!", $t_no);
         })
     };
 }
 
 fn main() {
+    println!("Using maximum x value: {}", MAX_X);
     let mut handles = Vec::new();
     let mut inst_senders = Vec::new();
     let mut res_receivers = Vec::new();
@@ -92,12 +92,16 @@ fn main() {
                 break 'progress_checker;
             }
         }
+        let mut errs = 0;
         // Receive responses from threads
         for (i, res_receiver) in res_receivers.iter().enumerate() {
-            match res_receiver.recv() {
+            match res_receiver.try_recv() {
                 Ok(t) => println!("Thread {} at {} seconds: {:?}", i, wait_time * wait_counter, t),
-                Err(_) => break 'progress_checker
+                Err(_) => errs += 1
             }
+        }
+        if errs == NUM_THREADS {
+            break 'progress_checker;
         }
         wait_counter += 1;
     }
