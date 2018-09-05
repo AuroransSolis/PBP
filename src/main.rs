@@ -4,8 +4,8 @@ use std::thread::{JoinHandle};
 use std::ops::Range;
 use std::iter::Iterator;
 
-const MAX_X: u64 = 800;
-const NUM_THREADS: usize = 8;
+const MAX_X: u64 = 2500;
+const NUM_THREADS: usize = 4;
 
 struct TesterThreadBuilder {
     inst_channel: Receiver<u8>,
@@ -81,6 +81,27 @@ fn main() {
     }
     println!("Constructed testing threads.");
     let total_time = std::time::Instant::now();
+    let wait_time = 30; // Time to wait
+    let mut wait_counter = 1;
+    'progress_checker: loop {
+        // Wait wait_time seconds, then query progress
+        thread::sleep_ms(wait_time * 1000);
+        // Query progress on all threads
+        for inst_sender in &inst_senders {
+            if let Err(_) = inst_sender.send(0) {
+                break 'progress_checker;
+            }
+        }
+        // Receive responses from threads
+        for (i, res_receiver) in res_receivers.iter().enumerate() {
+            match res_receiver.recv() {
+                Ok(t) => println!("Thread {} at {} seconds: {:?}", i, wait_time * wait_counter, t),
+                Err(_) => break 'progress_checker
+            }
+        }
+        wait_counter += 1;
+    }
+    // Wrap it all up
     for handle in handles {
         handle.join().unwrap();
     }
