@@ -2,8 +2,9 @@ use std::sync::{Arc, Mutex, mpsc, mpsc::{Sender, Receiver}};
 use std::thread;
 use std::iter::Iterator;
 
-const MAX_X: u64 = 750;
-const NUM_THREADS: usize = 8;
+const MAX_X: u64 = 1000;
+const NUM_THREADS: usize = 4;
+const WAIT_TIME: u32 = 15;
 
 struct TesterThreadBuilder {
     inst_channel: Receiver<u8>,
@@ -81,11 +82,10 @@ fn main() {
     }
     println!("Constructed testing threads.");
     let total_time = std::time::Instant::now();
-    let wait_time = 30; // Time to wait
     let mut wait_counter = 1;
     'progress_checker: loop {
-        // Wait wait_time seconds, then query progress
-        thread::sleep_ms(wait_time * 1000);
+        // Wait WAIT_TIME seconds, then query progress
+        thread::sleep_ms(WAIT_TIME * 1000);
         // Query progress on all threads
         for inst_sender in &inst_senders {
             inst_sender.send(0);
@@ -93,12 +93,14 @@ fn main() {
         let mut errs = 0;
         // Receive responses from threads
         for (i, res_receiver) in res_receivers.iter().enumerate() {
-            match res_receiver.try_recv() {
-                Ok(t) => println!("Thread {} at {} seconds: {:?}", i, wait_time * wait_counter, t),
+            match res_receiver.recv() {
+                Ok(t) => println!("Thread {} at {} seconds: {:?}", i, WAIT_TIME * wait_counter, t),
                 Err(_) => errs += 1
             }
         }
+        println!();
         if errs == NUM_THREADS {
+            println!("    All result senders have been dropped!");
             break 'progress_checker;
         }
         wait_counter += 1;
