@@ -88,9 +88,7 @@ fn main() {
         thread::sleep_ms(wait_time * 1000);
         // Query progress on all threads
         for inst_sender in &inst_senders {
-            if let Err(_) = inst_sender.send(0) {
-                break 'progress_checker;
-            }
+            inst_sender.send(0);
         }
         let mut errs = 0;
         // Receive responses from threads
