@@ -3,4 +3,12 @@ name = "pbp_rpi"
 version = "0.1.0"
 authors = ["AuroransSolis <primalucegd@gmail.com>"]
 
+[[bin]]
+name = "host"
+path = "src/host.rs"
+
+[[bin]]
+name = "client"
+path = "src/client.rs"
+
 [dependencies]
