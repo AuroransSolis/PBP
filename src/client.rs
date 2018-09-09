@@ -11,11 +11,11 @@ struct TesterThreadBuilder {
     res_channel: Sender<TTResult>
 }
 
-#[derive(Debug)]
+/*#[derive(Debug)]
 enum TTResult {
     Solution((u64, u64, u64)),
     At((u64, u64, u64))
-}
+}*/
 
 impl TesterThreadBuilder {
     fn new(ic: Receiver<u8>, rsc: Sender<TTResult>) -> TesterThreadBuilder {
