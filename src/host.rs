@@ -12,29 +12,41 @@ macro_rules! spawn_manager_io {
         thread::spawn(move || {
             'management_io: loop {
                 let mut input_buffer = String::new();
-                print!("> ");
+                print!("\n> ");
                 stdout().flush().unwrap();
                 stdin().read_line(&mut input_buffer).unwrap();
                 input_buffer = input_buffer.trim().to_owned();
-                if input_buffer == "q" || input_buffer == "quit" ||  input_buffer == "exit" {
+                if input_buffer == "q" {
                     $inst_sender.send(3).unwrap();
                     println!("Sent terminate signal to main thread.");
                     break 'management_io;
-                } else if input_buffer == "qp" || input_buffer == "q p" || input_buffer == "query p" ||
-                    input_buffer == "query prog" || input_buffer == "query progress" ||
-                    input_buffer == "q prog" || input_buffer == "q progress" || input_buffer == "at" {
+                } else if input_buffer == "qp" {
                     $inst_sender.send(0).unwrap();
                     println!("Sent progress query signal to main thread.");
-                } else if input_buffer == "pause" || input_buffer == "stop" || input_buffer == "halt" {
+                } else if input_buffer == "pause" {
                     $inst_sender.send(1).unwrap();
                     println!("Sent pause signal to main thread.");
-                } else if input_buffer == "play" || input_buffer == "continue" {
+                } else if input_buffer == "play" {
                     $inst_sender.send(2).unwrap();
                     println!("Sent play signal to main thread.");
-                } else if input_buffer == "nc" || input_buffer == "num c" ||
-                    input_buffer == "num connections" || input_buffer == "number of connections" {
+                } else if input_buffer == "nc" {
                     $inst_sender.send(4).unwrap();
                     println!("Sent query about number of connections to main thread.");
+                } else if input_buffer == "h" {
+                    println!("Available commands:\n\
+                        Format:\n\
+                    Name(command): description\n\
+                    Quit(q): forces the program to exit, regardless of whether or not clients are\
+                    \n\tfinished with execution or not.\n\
+                    Query progress(qp): query the progress of each client.\n\
+                    Pause(pause): pauses execution of clients.\n\
+                        \tpause, stop, halt\n\
+                    Play(play): resumes execution of clients.\n\
+                        \tplay, continue\n\
+                    Number of connections(nc): print out how many clients are currently connected.\n\
+                        \tnum connections, number of connections\n\
+                    Help(h): prints this dialog\n\
+                        \th, help");
                 }
             }
         })
@@ -70,8 +82,6 @@ fn main() {
                     for tcpstream in tcpstreams.iter_mut() {
                         // Write 'c' for command
                         drop(tcpstream.write_all(&mut ['c' as u8; 1]));
-                        // Write '1' for size of command
-                        drop(tcpstream.write_all(&mut [1; 1]));
                         // Write '0' for progress query command
                         drop(tcpstream.write_all(&mut [0; 1]));
                     }
@@ -80,8 +90,6 @@ fn main() {
                     for tcpstream in tcpstreams.iter_mut() {
                         // Write 'c' for command
                         drop(tcpstream.write_all(&mut ['c' as u8; 1]));
-                        // Write '1' for size of command
-                        drop(tcpstream.write_all(&mut [1; 1]));
                         // Write '1' for pause command
                         drop(tcpstream.write_all(&mut [1; 1]));
                     }
@@ -90,8 +98,6 @@ fn main() {
                     for tcpstream in tcpstreams.iter_mut() {
                         // Write 'c' for command
                         drop(tcpstream.write_all(&mut ['c' as u8; 1]));
-                        // Write '1' for size of command
-                        drop(tcpstream.write_all(&mut [1; 1]));
                         // Write '2' for resume command
                         drop(tcpstream.write_all(&mut [2; 1]));
                     }
@@ -144,11 +150,6 @@ fn main() {
                     } else {
                         send_term_signal = true;
                         break 'handle_insts;
-                    }
-                    let mut tmp: [u8; 1] = [0];
-                    if let Err(_) = tcpstream.read_exact(&mut tmp) {
-                        still_connected[i] = false;
-                        continue;
                     }
                 },
                 's' => {
