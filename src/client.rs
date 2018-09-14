@@ -33,9 +33,9 @@ macro_rules! spawn_manager_io_thread {
                     Name(command): description\n\
                         Options: [options]
                     Quit(q): end execution of this client and its threads.\n\
-                        Options: -s (soft terminate; each thread finishes testing its range of values\n\
-                            before returning and joining), -f (hard/force terminate; each thread stops \n\
-                            testing immediately upon getting this signal). Default: -s\n\
+                        Options: -s (soft terminate; each thread finishes testing its range of \n\
+                        values before returning and joining), -f (hard/force terminate; each\n\
+                        thread stops testing immediately upon getting this signal). Default: -s\n\
                     Query progress(at): query progress of child threads.\n\
                     Help(h): prints this dialog.");
                 }
@@ -45,16 +45,18 @@ macro_rules! spawn_manager_io_thread {
 }
 
 macro_rules! recv_incoming_type {
-    ($tcp_stream:ident, $loop_name:ident) => {
-        let mut recv_type_byte: [u8; 1] = [0];
-        if $tcp_stream.read_exact(&mut recv_type_byte).is_err() {
-            continue $loop_name;
+    ($tcp_stream:ident, $loop_name:tt) => {
+        {
+            let mut recv_type_byte: [u8; 1] = [0];
+            if $tcp_stream.read_exact(&mut recv_type_byte).is_err() {
+                continue $loop_name;
+            }
+            recv_type_byte[0] as char
         }
-        recv_type_byte[0] as char
     };
 }
 
-fn pause_thread(tcp_stream: &mut TcpStream) {
+fn pause_thread(tcp_stream: &mut TcpStream, x: u64, y: u64, z: u64) {
     'pause: loop {
         let mut recv_type: [u8; 1] = [0];
         let mut recv_command_bytes: [u8; 1] = [0];
@@ -67,19 +69,14 @@ fn pause_thread(tcp_stream: &mut TcpStream) {
                 if tcp_stream
                     .read_exact(&mut recv_command_byte)
                     .is_ok() {
-                    if recv_command_byte == 0 {
+                    if recv_command_byte[0] == 0 {
                         let xyz = [x, y, z];
                         let mut xyz_bytes = unsafe {
-                            transmute_copy::<[u64; 3],
-                                [u8; 24]>(xyz)
+                            transmute_copy::<[u64; 3], [u8; 24]>(&xyz)
                         };
-                        tcp_stream.write_all(
-                            &mut ['a' as u8; 1]
-                        );
-                        tcp_stream.write_all(
-                            &mut xyz_bytes
-                        );
-                    } else if recv_command_byte == 2 {
+                        drop(tcp_stream.write_all(&mut ['a' as u8; 1]));
+                        drop(tcp_stream.write_all(&mut xyz_bytes));
+                    } else if recv_command_byte[0] == 2 {
                         break 'pause;
                     }
                 }
@@ -89,57 +86,86 @@ fn pause_thread(tcp_stream: &mut TcpStream) {
 }
 
 fn send_xyz(tcp_stream: &mut TcpStream, xyz: [u64; 3]) {
-    let mut xyz_bytes = unsafe {
+    let xyz_bytes = unsafe {
         transmute_copy::<[u64; 3], [u8; 24]>(&xyz)
     };
-    tcp_stream.write_all(&['a' as u8; 1]);
-    tcp_stream.write_all(&xyz_bytes);
+    drop(tcp_stream.write_all(&['a' as u8; 1]));
+    drop(tcp_stream.write_all(&xyz_bytes));
 }
 
 macro_rules! spawn_tester_thread {
-    ($tcp_addr:ident, $wrap_up_sender:ident, $inst_sender:ident, $t_no:ident) => {
+    ($tcp_addr:ident, $wrap_up_sender:ident, $local_inst_receiver:ident, $t_no:ident) => {
         thread::spawn(move || {
-            let tcp_stream = TcpStream::connect($tcp_addr).unwrap();
+            let mut tcp_stream = TcpStream::connect($tcp_addr).unwrap();
             //tcp_stream.set_nonblocking(true).expect("Couldn't set TCP stream as nonblocking.");
+            println!("({}) Connected to host!", $t_no);
             'main_loop: loop {
                 let x = {
                     drop(tcp_stream.write_all(&['r' as u8; 1]));
+                    println!("({}) Wrote 'r' to host.", $t_no);
                     let mut recv_response: [u8; 1] = [0];
-                    tcp_stream.read_exact(&mut recv_response).
-                    let mut tcp_recv_bytes: [u8; 8] = [0];
+                    drop(tcp_stream.read_exact(&mut recv_response));
+                    let mut tcp_recv_bytes: [u8; 8] = [0; 8];
                     tcp_stream.read_exact(&mut tcp_recv_bytes)
                         .expect("Was unable to read from TCP stream.");
+                    println!("({}) Read bytes from host.", $t_no);
                     unsafe {
                         transmute_copy::<[u8; 8], u64>(&tcp_recv_bytes)
                     }
                 };
+                println!("({}) Got X value! {}", $t_no, x);
                 for y in (2..x / 24).map(|y| y * 24) {
                     for z in (2..(x - y) / 24).map(|z| z * 24).take_while(|&z| z != y) {
                         if test_squares(x, y, z) {
-                            ;
+                            drop(tcp_stream.write_all(&['s' as u8; 1]));
+                            let xyz_bytes = unsafe {
+                                transmute_copy::<[u64; 3], [u8; 24]>(&[x, y, z])
+                            };
+                            drop(tcp_stream.write_all(&xyz_bytes));
                         }
                         // If there's bytes to read on the TCP stream...
-                        if tcp_stream.peek().is_ok() {
+                        if tcp_stream.peek(&mut [0u8]).is_ok() {
                             // Assign the first byte here
                             let recv_type = recv_incoming_type!(tcp_stream, 'main_loop);
                             match recv_type {
                                 'c' => { // Command. Will be 0, 1, or 2
                                     let mut command_type: [u8; 1] = [0];
                                     drop(tcp_stream.read_exact(&mut command_type));
-                                    match command_type {
+                                    match command_type[0] {
                                         0 => send_xyz(&mut tcp_stream, [x, y, z]),
-                                        1 => pause_thread(&mut tcp_stream),
+                                        1 => pause_thread(&mut tcp_stream, x, y, z),
                                         _ => {}
                                     }
                                 }
-                                't' => break 'main_loop;
+                                't' => {
+                                    $wrap_up_sender.send(()).unwrap();
+                                    break 'main_loop
+                                },
+                                _ => {}
+                            }
+                        }
+                        if let Ok(inst) = $local_inst_receiver.try_recv() {
+                            match inst {
+                                2 => {
+                                    drop(tcp_stream.write_all(&['t' as u8; 1]));
+                                    break 'main_loop;
+                                },
+                                0 => {
+                                    println!("({}) Current XYZ | x: {}, y: {}, z: {}",
+                                        $t_no, x, y, z);
+                                },
                                 _ => {}
                             }
                         }
                     }
                 }
+                if let Ok(1) = $local_inst_receiver.try_recv() {
+                    drop(tcp_stream.write_all(&['t' as u8; 1]));
+                    break 'main_loop;
+                }
+                thread::sleep_ms(1000);
             }
-            println!("({}) Completed execution!", $t_no);
+            println!("({}) Finishing execution!", $t_no);
         })
     };
 }
@@ -178,10 +204,11 @@ fn main() {
                         inst_sender.send(1).unwrap();
                     }
                     while active_threads != [false; NUM_THREADS] {
-                        for (i, receiver) in wrap_up_receivers.iter().enumerate()
-                            .filter(|&(i, _)| active_threads[i]) {
-                            if let Ok(_) = receiver.try_recv() {
-                                active_threads[i] = false;
+                        for (i, receiver) in wrap_up_receivers.iter().enumerate() {
+                            if active_threads[i] {
+                                if let Ok(_) = receiver.try_recv() {
+                                   active_threads[i] = false;
+                                }
                             }
                         }
                     }

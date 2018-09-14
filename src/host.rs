@@ -73,6 +73,12 @@ fn main() {
             tcpstream.set_read_timeout(Some(Duration::from_millis(5000))).expect("Unable to set \
             write timeout on new connection.");
             tcpstreams.push(tcpstream);
+            println!("    Accepted new connection!");
+        } else {
+            println!("    No new incoming connections.");
+        }
+        if tcpstreams.len() == 0 {
+            continue 'main_loop;
         }
         // Check for instruction on the IO channel
         if let Ok(instr) = inst_receiver.recv() {
@@ -85,6 +91,7 @@ fn main() {
                         // Write '0' for progress query command
                         drop(tcpstream.write_all(&mut [0; 1]));
                     }
+                    println!("Wrote 'c 0' to all TCP streams.");
                 },
                 1 => { // Pause
                     for tcpstream in tcpstreams.iter_mut() {
@@ -93,6 +100,7 @@ fn main() {
                         // Write '1' for pause command
                         drop(tcpstream.write_all(&mut [1; 1]));
                     }
+                    println!("Wrote 'c 1' to all TCP streams.");
                 },
                 2 => { // Play
                     for tcpstream in tcpstreams.iter_mut() {
@@ -101,9 +109,11 @@ fn main() {
                         // Write '2' for resume command
                         drop(tcpstream.write_all(&mut [2; 1]));
                     }
+                    println!("Wrote 'c 2' to all TCP streams.");
                 },
                 3 => { // Terminate
                     send_term_signal = true;
+                    println!("Set send_term_signal to true.");
                     continue 'main_loop;
                 },
                 4 => { // Query number of connections
@@ -115,6 +125,7 @@ fn main() {
         let mut still_connected = vec![true; tcpstreams.len()];
         // Try to receive instruction type from TcpStreams. If a read times out, assume the client
         // is no longer connected.
+        println!("Receiving instructions from TCP streams.");
         'handle_insts: for (i, tcpstream) in tcpstreams.iter_mut().enumerate() {
             let mut recv_instr_byte: [u8; 1] = [0];
             if let Err(_) = tcpstream.read_exact(&mut recv_instr_byte) {
@@ -122,6 +133,7 @@ fn main() {
                 continue;
             }
             let instr = recv_instr_byte[0] as char;
+            println!("Received instruction from TCP stream ({:?}): {}", tcpstream.peer_addr(), instr);
             match instr {
                 'a' => {
                     let mut recv_at_bytes: [u8; 24] = [0; 24];
