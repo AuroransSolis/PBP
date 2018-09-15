@@ -1,18 +1,19 @@
-use std::io::{prelude::*, stdout, stdin};
+use std::io::{self, Read, prelude::*, stdout, stdin};
 use std::net::{TcpListener, TcpStream};
 use std::mem::transmute_copy;
 use std::sync::mpsc::{channel, Sender, Receiver};
 use std::time::Duration;
 use std::thread;
+use std::io::ErrorKind::WouldBlock;
 
 const MAX_X: u64 = 1000;
+const TRY_RECV_DATA_TIMEOUT: u64 = 5;
 
 macro_rules! spawn_manager_io {
     ($inst_sender:ident) => {
         thread::spawn(move || {
             'management_io: loop {
                 let mut input_buffer = String::new();
-                print!("\n> ");
                 stdout().flush().unwrap();
                 stdin().read_line(&mut input_buffer).unwrap();
                 input_buffer = input_buffer.trim().to_owned();
@@ -53,6 +54,12 @@ macro_rules! spawn_manager_io {
     };
 }
 
+/*macro_rules! spawn_handler_thread {
+    ($tcp_stream:ident, $term_signal_channel:ident) => {
+
+    };
+}*/
+
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:1337").unwrap();
     listener.set_nonblocking(true).expect("Could not set listener to be non-blocking.");
@@ -67,21 +74,17 @@ fn main() {
             for tcpstream in tcpstreams.iter_mut() {
                 drop(tcpstream.write_all(&mut ['t' as u8; 1]));
             }
+            println!("Wrote 't' to all connected TCP streams.");
             break 'main_loop;
         };
         if let Ok((tcpstream, _)) = listener.accept() {
             tcpstream.set_read_timeout(Some(Duration::from_millis(5000))).expect("Unable to set \
             write timeout on new connection.");
+            println!("    Accepted new connection! {:?}", tcpstream.peer_addr());
             tcpstreams.push(tcpstream);
-            println!("    Accepted new connection!");
-        } else {
-            println!("    No new incoming connections.");
-        }
-        if tcpstreams.len() == 0 {
-            continue 'main_loop;
         }
         // Check for instruction on the IO channel
-        if let Ok(instr) = inst_receiver.recv() {
+        if let Ok(instr) = inst_receiver.try_recv() {
             match instr {
                 0 => { // Progress query
                     // Try to write a progress query to all connected streams
@@ -122,24 +125,36 @@ fn main() {
                 _ => {}
             }
         }
+        if tcpstreams.len() == 0 {
+            continue 'main_loop;
+        }
         let mut still_connected = vec![true; tcpstreams.len()];
         // Try to receive instruction type from TcpStreams. If a read times out, assume the client
         // is no longer connected.
-        println!("Receiving instructions from TCP streams.");
         'handle_insts: for (i, tcpstream) in tcpstreams.iter_mut().enumerate() {
             let mut recv_instr_byte: [u8; 1] = [0];
-            if let Err(_) = tcpstream.read_exact(&mut recv_instr_byte) {
-                still_connected[i] = false;
-                continue;
+            if let Err(e) = tcpstream.read_exact(&mut recv_instr_byte) {
+                if e.kind() != WouldBlock {
+                    still_connected[i] = false;
+                    println!("TCP stream {} disconnected.", i);
+                }
+                continue 'handle_insts;
             }
             let instr = recv_instr_byte[0] as char;
-            println!("Received instruction from TCP stream ({:?}): {}", tcpstream.peer_addr(), instr);
             match instr {
                 'a' => {
                     let mut recv_at_bytes: [u8; 24] = [0; 24];
-                    if let Err(_) = tcpstream.read_exact(&mut recv_at_bytes) {
-                        still_connected[i] = false;
-                        continue 'handle_insts;
+                    let tmr = std::time::Instant::now();
+                    while let Err(e) = tcpstream.read_exact(&mut recv_at_bytes) {
+                        if e.kind() != WouldBlock {
+                            still_connected[i] = false;
+                            println!("TCP stream {} disconnected.", i);
+                            continue;
+                        }
+                        if tmr.elapsed().as_secs() > TRY_RECV_DATA_TIMEOUT {
+                            println!("Was unable to receive XYZ from client {}.", i);
+                            continue 'handle_insts;
+                        }
                     }
                     let recv_at_xyz = unsafe {
                         transmute_copy::<[u8; 24], [u64; 3]>(&recv_at_bytes)
@@ -150,9 +165,7 @@ fn main() {
                 'r' => {
                     if let Some(x) = iterator.next() {
                         // Write 'x' for new x
-                        drop(tcpstream.write_all(&mut ['x' as u8; 0]));
-                        // Write '8' for size of u64 in bytes
-                        drop(tcpstream.write_all(&mut [8; 0]));
+                        drop(tcpstream.write_all(&mut [b'x'; 1]));
                         // Get bytes for 'x'
                         let mut x_bytes = unsafe {
                             transmute_copy::<u64, [u8; 8]>(&x)
@@ -166,8 +179,11 @@ fn main() {
                 },
                 's' => {
                     let mut recv_solution_bytes: [u8; 24] = [0; 24];
-                    if let Err(_) = tcpstream.read_exact(&mut recv_solution_bytes) {
-                        still_connected[i] = false;
+                    if let Err(e) = tcpstream.read_exact(&mut recv_solution_bytes) {
+                        if e.kind() != WouldBlock {
+                            still_connected[i] = false;
+                            println!("TCP stream {} disconnected.", i);
+                        }
                         continue 'handle_insts;
                     }
                     let recv_solution_xyz = unsafe {
@@ -191,6 +207,7 @@ fn main() {
                 tcpstreams.remove(i);
             }
         }
+        thread::sleep_ms(1000);
     }
     terminal_manager.join().unwrap();
     println!("Execution completed.");

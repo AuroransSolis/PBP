@@ -3,6 +3,7 @@ use std::thread;
 use std::io::{prelude::*, stdin, stdout};
 use std::net::TcpStream;
 use std::mem::transmute_copy;
+use std::time::Duration;
 
 const MAX_X: u64 = 1000;
 const NUM_THREADS: usize = 4;
@@ -12,7 +13,6 @@ macro_rules! spawn_manager_io_thread {
         thread::spawn(move || {
             'io_loop: loop {
                 let mut input_buffer = String::new();
-                print!("\n> ");
                 stdout().flush().unwrap();
                 stdin().read_line(&mut input_buffer).unwrap();
                 input_buffer = input_buffer.trim().to_owned();
@@ -97,23 +97,34 @@ macro_rules! spawn_tester_thread {
     ($tcp_addr:ident, $wrap_up_sender:ident, $local_inst_receiver:ident, $t_no:ident) => {
         thread::spawn(move || {
             let mut tcp_stream = TcpStream::connect($tcp_addr).unwrap();
+            tcp_stream.set_read_timeout(Some(Duration::from_millis(5000))).expect("Was unable to \
+            set read timeout.");
             //tcp_stream.set_nonblocking(true).expect("Couldn't set TCP stream as nonblocking.");
             println!("({}) Connected to host!", $t_no);
             'main_loop: loop {
                 let x = {
+                    // Write 't' to the TCP stream to request work
                     drop(tcp_stream.write_all(&['r' as u8; 1]));
-                    println!("({}) Wrote 'r' to host.", $t_no);
+                    // Get response
                     let mut recv_response: [u8; 1] = [0];
                     drop(tcp_stream.read_exact(&mut recv_response));
+                    // The client should only care if it's t
+                    if recv_response[0] as char == 't' {
+                        println!("({}) Got unexpected terminate signal. Closing thread.", $t_no);
+                        $wrap_up_sender.send(()).unwrap();
+                        break 'main_loop;
+                    }
+                    // If it's anything else, just continue the main loop to re-request work.
+                    if recv_response[0] as char != 'x' {
+                        continue 'main_loop;
+                    }
                     let mut tcp_recv_bytes: [u8; 8] = [0; 8];
                     tcp_stream.read_exact(&mut tcp_recv_bytes)
                         .expect("Was unable to read from TCP stream.");
-                    println!("({}) Read bytes from host.", $t_no);
                     unsafe {
                         transmute_copy::<[u8; 8], u64>(&tcp_recv_bytes)
                     }
                 };
-                println!("({}) Got X value! {}", $t_no, x);
                 for y in (2..x / 24).map(|y| y * 24) {
                     for z in (2..(x - y) / 24).map(|z| z * 24).take_while(|&z| z != y) {
                         if test_squares(x, y, z) {
@@ -138,6 +149,7 @@ macro_rules! spawn_tester_thread {
                                     }
                                 }
                                 't' => {
+                                    println!("({}) Got terminate signal from host.", $t_no);
                                     $wrap_up_sender.send(()).unwrap();
                                     break 'main_loop
                                 },
@@ -232,9 +244,6 @@ fn main() {
             break 'manager_loop;
         }
     }
-    for handle in handles {
-        handle.join().unwrap();
-    }
     println!("Closing up shop.");
 }
 
@@ -242,9 +251,6 @@ fn main() {
 const GOOD_MASK: u64 = 0xC840C04048404040;
 
 fn is_valid_square(mut n: u64) -> bool {
-    if n % 24 != 1 {
-        return false;
-    }
     if (GOOD_MASK << n) as i64 >= 0 {
         return false;
     }
