@@ -61,7 +61,7 @@ macro_rules! spawn_manager_io {
 }*/
 
 fn main() {
-    let listener = TcpListener::bind("127.0.0.1:1337").unwrap();
+    let listener = TcpListener::bind("169.254.36.152:1337").unwrap();
     listener.set_nonblocking(true).expect("Could not set listener to be non-blocking.");
     let mut tcpstreams: Vec<TcpStream> = Vec::new();
     let timer = std::time::Instant::now();

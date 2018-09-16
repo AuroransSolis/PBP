@@ -189,7 +189,7 @@ macro_rules! spawn_tester_thread {
 
 fn main() {
     println!("Using maximum x value: {}", MAX_X);
-    let tcp_addr: &'static str = "127.0.0.1:1337";
+    let tcp_addr: &'static str = "169.254.36.152:1337";
     let mut inst_senders = Vec::new();
     let mut wrap_up_receivers = Vec::new();
     let mut handles = Vec::new();
