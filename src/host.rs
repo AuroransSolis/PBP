@@ -4,7 +4,7 @@ use std::mem::transmute_copy;
 use std::sync::{mpsc::{channel, Sender, Receiver}, Arc, Mutex};
 use std::time::Duration;
 use std::thread::{self, JoinHandle};
-use std::io::ErrorKind::WouldBlock;
+use std::io::ErrorKind::{WouldBlock, TimedOut};
 
 const MAX_X: u64 = 1000;
 const TRY_RECV_DATA_TIMEOUT: u64 = 5;
@@ -63,10 +63,30 @@ fn spawn_io_manager(inst_sender: Sender<u8>) {
     });
 }
 
+const HEARTBEAT_TIMEOUT: u64 = 5;
+const HEARTBEAT_TIMER: u64 = 30;
+
+fn heartbeat(mut tcp_stream: TcpStream) -> bool {
+    drop(tcp_stream.write_all(&['h' as u8; 1]));
+    let mut response: [u8; 1] = [0];
+    tcp_stream.set_read_timeout(Some(std::time::Duration::from_secs(HEARTBEAT_TIMEOUT)));
+    match tcp_stream.read_exact(&mut response) {
+        Ok(_) => true,
+        Err(_) => false, 
+    }
+}
+
 fn spawn_handler_thread(c_no: usize, mut tcp_stream: TcpStream, manager_inst_recv: Receiver<u8>,
                         arc_mut_iter: Arc<Mutex<Iterator<Item = u64>>>) {
     thread::spawn(move || {
+        let mut timer = std::time::Instant::now();
         'main_loop: loop {
+            if timer.elapsed().as_secs() > HEARTBEAT_TIMER {
+                if !heartbeat(tcp_stream) {
+                    break 'main_loop;
+                }
+                timer = std::time::Instant::now();
+            }
             // Handle receiving instructions from the TCP stream
             let mut recv_instr_byte: [u8; 1] = [0];
             if let Err(e) = tcp_stream.read_exact(&mut recv_instr_byte) {
@@ -178,15 +198,15 @@ fn main() {
             if soft_term {
 
             }
-            for wrap_up_sender in wrap_up_senders {
-                wrap_up_sender.send(()).unwrap();
+            for handler_thread_inst_sender in handler_thread_inst_senders {
+                handler_thread_inst_sender.send(()).unwrap();
             }
             println!("Sent wrap-up signal to all TCP handler threads.");
             break 'main_loop;
         };
         if let Ok((tcpstream, _)) = listener.accept() {
-            tcpstream.set_read_timeout(Some(Duration::from_millis(5000))).expect("Unable to set \
-            write timeout on new connection.");
+            //tcpstream.set_read_timeout(Some(Duration::from_millis(5000))).expect("Unable to set \
+            //write timeout on new connection.");
             println!("    Accepted new connection! {:?}", tcpstream.peer_addr());
             let (handler_inst_send, handler_inst_recv): (Sender<u8>, Receiver<u8>) = channel();
             handler_thread_inst_senders.push(handler_inst_send);

@@ -1,15 +1,14 @@
 #![recursion_limit="128"]
 
 use std::sync::{mpsc::{self, Sender, Receiver, TryRecvError::*}};
-use std::thread;
-use std::io::{prelude::*, stdin, stdout};
+use std::thread::{self, JoinHandle};
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::mem::transmute_copy;
 use std::time::Duration;
 
 const MAX_X: u64 = 1000;
 const NUM_THREADS: usize = 4;
-const GET_X_RECURSION_LIMIT: u8 = 10;
 
 fn pause_thread(tcp_stream: &mut TcpStream, x: u64, y: u64, z: u64) {
     'pause: loop {
@@ -49,7 +48,17 @@ fn send_xyz(tcp_stream: &mut TcpStream, xyz: [u64; 3]) {
     drop(tcp_stream.write_all(&xyz_bytes));
 }
 
-// Deep breaths. Deep breaths. I know this is deeply wrong, but please bear with me.
+// Deep breaths. Deep breaths. I know this is deeply wrong, but please bear with me. I need limited
+// recursion, which is something I can't achieve with normal macros and just, say, a "recursion
+// counter" variable that gets passed in as an identifier. So, I forced "identifiers" by having a
+// linear progression through a list of macros with a given "label" at the start, like 'a', 'b', or
+// 'c', where macro!(a, other_args) calls macro!(b, other_args) in the case where macro!() would
+// recurse, and macro!(b, other_args) calls macro!(c, other_args) in the same case. However, in
+// this case, 'c' is the last "label" in the series, so any case where macro!() would recurse
+// results in a panic. This macro provides a way of generating that "limited recursion." In the
+// case of how I've used it, sorta_recursive_get_x!(a, other_args) is the entry point for the
+// limited recursion I need to get an x value after a data request in the case that the host sends
+// a command after the data request is sent and before the data is received by the client.
 macro_rules! gen_sorta_recursive_get_x_macro {
     ($($start_label:tt => $points_to:tt),*; $last_label:tt) => {
         macro_rules! sorta_recursive_get_x {
@@ -60,6 +69,10 @@ macro_rules! gen_sorta_recursive_get_x_macro {
                     drop($tcp_strm.read_exact(&mut recv_response));
                     let recv_response = recv_response[0] as char;
                     match recv_response {
+                        'h' => { // Heartbeat
+                            drop($tcp_strm.write_all(&['h' as u8; 1]));
+                            sorta_recursive_get_x!($points_to $tcp_strm, $wus, $cno, $ml)
+                        },
                         'x' => { // New x value
                             let mut tcp_recv_bytes: [u8; 8] = [0; 8];
                             $tcp_strm.read_exact(&mut tcp_recv_bytes)
@@ -71,12 +84,13 @@ macro_rules! gen_sorta_recursive_get_x_macro {
                         't' => { // Terminate
                             let mut next_byte: [u8; 1] = [0];
                             drop($tcp_strm.read_exact(&mut next_byte));
-                            if next_byte[0] as char = 'f' { // Iterator finished!
+                            if next_byte[0] as char == 'f' { // Iterator finished!
                                 println!("({}) Host iterator finished! Exiting.", $cno);
                             } else {
                                 println!("({}) Got unexpected terminate signal. Exiting.",
                                     $cno);
                             }
+                            drop($tcp_strm.write_all(&['t' as u8; 1]));
                             $wus.send(()).unwrap();
                             break $ml;
                         },
@@ -87,16 +101,14 @@ macro_rules! gen_sorta_recursive_get_x_macro {
                                 0 => {
                                     send_xyz(&mut $tcp_strm, ['e' as u64, 'r' as u64,
                                         'r' as u64]);
-                                    sorta_recursive_get_x!($points_to $tcp_strm, $wus, $cno,
-                                        $ml)
+                                    sorta_recursive_get_x!($points_to $tcp_strm, $wus, $cno, $ml)
                                 },
                                 1 => {
-                                    pause_thread(&mut $tcp_stream, 'e' as u64, 'r' as u64,
+                                    pause_thread(&mut $tcp_strm, 'e' as u64, 'r' as u64,
                                         'r' as u64);
-                                    sorta_recursive_get_x!($points_to $tcp_strm, $wus, $cno,
-                                        $ml)
+                                    sorta_recursive_get_x!($points_to $tcp_strm, $wus, $cno, $ml)
                                 },
-                                2 => {},
+                                2 => sorta_recursive_get_x!($points_to $tcp_strm, $wus, $cno, $ml),
                                 n @ _ => panic!(format!("({}) Got 'c {}'. Wotfok?", $cno, n))
                             }
                         },
@@ -113,6 +125,10 @@ macro_rules! gen_sorta_recursive_get_x_macro {
                     drop($tcp_strm.read_exact(&mut recv_response));
                     let recv_response = recv_response[0] as char;
                     match recv_response {
+                        'h' => { // Heartbeat
+                            drop($tcp_strm.write_all(&['t' as u8; 1]));
+                            panic!(format!("({}) 'get_x!' recursion limit reached!", $cno));
+                        },
                         'x' => { // New x value
                             let mut tcp_recv_bytes: [u8; 8] = [0; 8];
                             $tcp_strm.read_exact(&mut tcp_recv_bytes)
@@ -124,12 +140,13 @@ macro_rules! gen_sorta_recursive_get_x_macro {
                         't' => { // Terminate
                             let mut next_byte: [u8; 1] = [0];
                             drop($tcp_strm.read_exact(&mut next_byte));
-                            if next_byte[0] as char = 'f' { // Iterator finished!
+                            if next_byte[0] as char == 'f' { // Iterator finished!
                                 println!("({}) Host iterator finished! Exiting.", $cno);
                             } else {
                                 println!("({}) Got unexpected terminate signal. Exiting.",
                                     $cno);
                             }
+                            drop($tcp_strm.write_all(&['t' as u8; 1]));
                             $wus.send(()).unwrap();
                             break $ml;
                         },
@@ -138,13 +155,24 @@ macro_rules! gen_sorta_recursive_get_x_macro {
                             drop($tcp_strm.read_exact(&mut command_type));
                             match command_type[0] {
                                 0 => {
+                                    drop($tcp_strm.write_all(&['t' as u8; 1]));
+                                    $wus.send(()).unwrap();
                                     panic!(format!("({}) 'get_x!' recursion limit reached!", $cno));
                                 },
                                 1 => {
+                                    drop($tcp_strm.write_all(&['t' as u8; 1]));
+                                    $wus.send(()).unwrap();
                                     panic!(format!("({}) 'get_x!' recursion limit reached!", $cno));
                                 },
-                                2 => {},
-                                n @ _ => panic!(format!("({}) Got 'c {}'. Wotfok?", $cno, n))
+                                2 => {
+                                    drop($tcp_strm.write_all(&['t' as u8; 1]));
+                                    $wus.send(()).unwrap();
+                                    panic!(format!("({}) 'get_x!' recursion limit reached!", $cno));
+                                },
+                                n @ _ => {
+                                    $wus.send(()).unwrap();
+                                    panic!(format!("({}) Got 'c {}'. Wotfok?", $cno, n));
+                                }
                             }
                         },
                         n @ _ => panic!(format!("({}) Got incoming data indicator: {}.\
@@ -160,14 +188,8 @@ macro_rules! gen_sorta_recursive_get_x_macro {
 gen_sorta_recursive_get_x_macro!{
     a => b,
     b => c,
-    c => d,
-    d => e,
-    e => f,
-    f => g,
-    g => h,
-    h => i,
-    i => j;
-    j
+    c => d;
+    d
 }
 
 // Feel free to take a deep breath and prepare for disappointment.
@@ -192,10 +214,10 @@ macro_rules! get_x {
                 't' => { // Terminate
                     let mut next_byte: [u8; 1] = [0];
                     drop($tcp_stream.read_exact(&mut next_byte));
-                    if next_byte[0] as char = 'f' { // Iterator finished!
-                        println!("({}) Host iterator finished! Closing thread.", c_no);
+                    if next_byte[0] as char == 'f' { // Iterator finished!
+                        println!("({}) Host iterator finished! Closing thread.", $c_no);
                     } else {
-                        println!("({}) Got unexpected terminate signal. Closing thread.", c_no);
+                        println!("({}) Got unexpected terminate signal. Closing thread.", $c_no);
                     }
                     $wrap_up_sender.send(()).unwrap();
                     break $main_loop;
@@ -218,7 +240,8 @@ macro_rules! get_x {
                             sorta_recursive_get_x!(a $tcp_stream, $wrap_up_sender, $c_no,
                                 $main_loop)
                         },
-                        2 => {},
+                        2 => sorta_recursive_get_x!(a $tcp_stream, $wrap_up_sender, $c_no,
+                                $main_loop),
                         n @ _ => panic!(format!("({}) Got 'c {}'. Wotfok?", $c_no, n))
                     }
                 },
@@ -229,8 +252,7 @@ macro_rules! get_x {
     };
 }
 
-fn spawn_tester_thread(
-    tcp_addr: String, wrap_up_sender: Sender<()>, c_no: usize) {
+fn spawn_tester_thread(tcp_addr: &'static str, wrap_up_sender: Sender<()>, c_no: usize) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut tcp_stream = TcpStream::connect(tcp_addr).unwrap();
         tcp_stream.set_read_timeout(Some(Duration::from_millis(5000))).expect("Was unable to \
@@ -243,7 +265,6 @@ fn spawn_tester_thread(
                 break 'main_loop;
             }
             // Get x value for testing
-            let mut recursion_count = 0;
             let x = get_x!(tcp_stream, wrap_up_sender, c_no, 'main_loop);
             for y in (2..x / 24).map(|y| y * 24) {
                 for z in (2..(x - y) / 24).map(|z| z * 24).take_while(|&z| z != y) {
@@ -273,7 +294,7 @@ fn spawn_tester_thread(
                                 }
                             }
                             't' => {
-                                let mut term_type: [u8; 1] = 0;
+                                let mut term_type: [u8; 1] = [0];
                                 drop(tcp_stream.read_exact(&mut term_type));
                                 match term_type[0] as char {
                                     's' => {
@@ -284,7 +305,8 @@ fn spawn_tester_thread(
                                         println!("({}) Got hard terminate signal from host.", c_no);
                                         wrap_up_sender.send(()).unwrap();
                                         break 'main_loop;
-                                    }
+                                    },
+                                    _ => {}
                                 }
                             },
                             _ => {}
@@ -303,9 +325,8 @@ fn main() {
     let mut wrap_up_receivers = Vec::new();
     let mut handles = Vec::new();
     for i in 0..NUM_THREADS {
-        let (inst_sender, inst_receiver): (Sender<u8>, Receiver<u8>) = mpsc::channel();
         let (wrap_up_sender, wrap_up_receiver): (Sender<()>, Receiver<()>) = mpsc::channel();
-        handles.push(spawn_tester_thread!(tcp_addr, wrap_up_sender, inst_receiver, i));
+        handles.push(spawn_tester_thread(tcp_addr, wrap_up_sender, i));
         wrap_up_receivers.push(wrap_up_receiver);
     }
     let mut active_threads = [true; NUM_THREADS];
