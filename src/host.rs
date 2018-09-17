@@ -79,6 +79,7 @@ fn heartbeat(mut tcp_stream: TcpStream) -> bool {
 fn spawn_handler_thread(c_no: usize, mut tcp_stream: TcpStream, manager_inst_recv: Receiver<u8>,
                         arc_mut_iter: Arc<Mutex<Iterator<Item = u64>>>) {
     thread::spawn(move || {
+        let total_timer = std::time::Instant::now();
         let mut timer = std::time::Instant::now();
         'main_loop: loop {
             if timer.elapsed().as_secs() > HEARTBEAT_TIMER {
@@ -171,7 +172,22 @@ fn spawn_handler_thread(c_no: usize, mut tcp_stream: TcpStream, manager_inst_rec
             }
             if let Ok(inst) = manager_inst_recv.try_recv() {
                 match inst {
-                    0 => {
+                    0 => { // Progress query
+                        drop(tcp_stream.write_all(&['c' as u8; 1]));
+                        drop(tcp_stream.write_all(&[0; 1]));
+                    },
+                    1 => { // Pause
+                        drop(tcp_stream.write_all(&['c' as u8; 1]));
+                        drop(tcp_stream.write_all(&[1; 1]));
+                    },
+                    2 => { // Play
+                        drop(tcp_stream.write_all(&['c' as u8; 1]));
+                        drop(tcp_stream.write_all(&[2; 1]));
+                    },
+                    3 => { // Soft terminate
+
+                    },
+                    4 => { // Hard terminate
 
                     }
                 }
@@ -196,13 +212,16 @@ fn main() {
     'main_loop: loop {
         if send_term_signal {
             if soft_term {
-
+                for handler_thread_inst_sender in handler_thread_inst_senders.iter() {
+                    handler_thread_inst_sender.send(3).unwrap();
+                }
+                println!("Sent soft terminate signal to all TCP handler threads.");
+            } else {
+                for handler_thread_inst_sender in handler_thread_inst_senders.iter() {
+                    handler_thread_inst_sender.send(4).unwrap();
+                }
+                break 'main_loop;
             }
-            for handler_thread_inst_sender in handler_thread_inst_senders {
-                handler_thread_inst_sender.send(()).unwrap();
-            }
-            println!("Sent wrap-up signal to all TCP handler threads.");
-            break 'main_loop;
         };
         if let Ok((tcpstream, _)) = listener.accept() {
             //tcpstream.set_read_timeout(Some(Duration::from_millis(5000))).expect("Unable to set \
@@ -250,14 +269,17 @@ fn main() {
                 },
                 3 => { // Terminate
                     send_term_signal = true;
-                    println!("Set send_term_signal to true.");
+                    println!("Set send_term_signal to true, set soft_term to true.");
                     continue 'main_loop;
                 },
                 4 => { // Query number of connections
                     println!("Current number of connections: {}", handler_thread_handles.len());
                 },
                 5 => {
-
+                    send_term_signal = true;
+                    soft_term = false;
+                    println!("Set send_term_signal to true, set soft_term to false.");
+                    continue 'main_loop;
                 }
                 _ => {}
             }
@@ -268,7 +290,6 @@ fn main() {
             }
         }
     }
-    terminal_manager.join().unwrap();
     println!("Execution completed.");
 }
 
