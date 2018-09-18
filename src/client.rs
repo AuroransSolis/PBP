@@ -1,5 +1,3 @@
-#![recursion_limit="128"]
-
 use std::sync::{mpsc::{self, Sender, Receiver, TryRecvError::*}};
 use std::thread::{self, JoinHandle};
 use std::io::{Read, Write};
@@ -203,6 +201,10 @@ macro_rules! get_x {
             drop($tcp_stream.read_exact(&mut recv_response));
             let recv_response = recv_response[0] as char;
             match recv_response {
+                'h' => {
+                    drop($tcp_stream.write_all(['h' as u8; 1]));
+                    sorta_recursive_get_x!(a $tcp_stream, $wrap_up_sender, $c_no, $main_loop)
+                }
                 'x' => { // New x value
                     let mut tcp_recv_bytes: [u8; 8] = [0; 8];
                     $tcp_stream.read_exact(&mut tcp_recv_bytes)
@@ -259,7 +261,7 @@ fn spawn_tester_thread(tcp_addr: &'static str, wrap_up_sender: Sender<()>, c_no:
             set read timeout.");
         //tcp_stream.set_nonblocking(true).expect("Couldn't set TCP stream as nonblocking.");
         println!("({}) Connected to host!", c_no);
-        let mut soft_term = true;
+        let mut soft_term = false;
         'main_loop: loop {
             if soft_term {
                 break 'main_loop;

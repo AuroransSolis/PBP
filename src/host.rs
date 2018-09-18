@@ -1,10 +1,9 @@
-use std::io::{self, Read, prelude::*, stdout, stdin};
+use std::io::{Read, prelude::*, stdout, stdin};
 use std::net::{TcpListener, TcpStream};
 use std::mem::transmute_copy;
 use std::sync::{mpsc::{channel, Sender, Receiver}, Arc, Mutex};
-use std::time::Duration;
 use std::thread::{self, JoinHandle};
-use std::io::ErrorKind::{WouldBlock, TimedOut};
+use std::io::ErrorKind::{WouldBlock};
 
 const MAX_X: u64 = 1000;
 const TRY_RECV_DATA_TIMEOUT: u64 = 5;
@@ -77,7 +76,7 @@ fn heartbeat(mut tcp_stream: TcpStream) -> bool {
 }
 
 fn spawn_handler_thread(c_no: usize, mut tcp_stream: TcpStream, manager_inst_recv: Receiver<u8>,
-                        arc_mut_iter: Arc<Mutex<Iterator<Item = u64>>>) {
+                        arc_mut_iter: Arc<Mutex<Iterator<Item = u64>>>) -> JoinHandle<()> {
     thread::spawn(move || {
         let total_timer = std::time::Instant::now();
         let mut timer = std::time::Instant::now();
@@ -108,17 +107,17 @@ fn spawn_handler_thread(c_no: usize, mut tcp_stream: TcpStream, manager_inst_rec
                             break 'main_loop;
                         }
                         if tmr.elapsed().as_secs() > TRY_RECV_DATA_TIMEOUT {
-                            println!("Was unable to receive XYZ from client {}.", i);
+                            println!("Was unable to receive XYZ from client {}.", c_no);
                             continue 'main_loop;
                         }
                     }
                     let recv_at_xyz = unsafe {
                         transmute_copy::<[u8; 24], [u64; 3]>(&recv_at_bytes)
                     };
-                    if recv_xyz == ['e' as u64, 'r' as u64, 'r' as u64] {
-                        println!("Client {}: error receiving progress - no current x value.");
+                    if recv_at_xyz == ['e' as u64, 'r' as u64, 'r' as u64] {
+                        println!("Client {}: error receiving progress - no current x value.", c_no);
                     } else {
-                        println!("Client {} progress at {:?} | x: {}, y: {}, z: {}", i,
+                        println!("Client {} progress at {:?} | x: {}, y: {}, z: {}", c_no,
                                  timer.elapsed(), recv_at_xyz[0], recv_at_xyz[1], recv_at_xyz[2]);
                     }
                 },
@@ -151,7 +150,7 @@ fn spawn_handler_thread(c_no: usize, mut tcp_stream: TcpStream, manager_inst_rec
                     if let Err(e) = tcp_stream.read_exact(&mut recv_solution_bytes) {
                         if e.kind() != WouldBlock {
                             ;
-                            println!("TCP stream {} disconnected.", i);
+                            println!("TCP stream {} disconnected.", c_no);
                         }
                         continue 'main_loop;
                     }
@@ -185,15 +184,18 @@ fn spawn_handler_thread(c_no: usize, mut tcp_stream: TcpStream, manager_inst_rec
                         drop(tcp_stream.write_all(&[2; 1]));
                     },
                     3 => { // Soft terminate
-
+                        drop(tcp_stream.write_all(&['t' as u8; 1]));
+                        drop(tcp_stream.write_all(&['s' as u8; 1]));
                     },
                     4 => { // Hard terminate
-
-                    }
+                        drop(tcp_stream.write_all(&['t' as u8; 1]));
+                        drop(tcp_stream.write_all(&['h' as u8; 1]));
+                    },
+                    _ => {}
                 }
             }
         }
-    });
+    })
 }
 
 fn main() {
@@ -205,14 +207,15 @@ fn main() {
     // I won't actually join() this at the end, since working in a proper receiving loop would be
     // a pain. So I'll just ignore joining it.
     spawn_io_manager(inst_sender);
-    let mut handler_thread_inst_senders = Vec::new();
+    let mut handler_thread_inst_senders: Vec<Sender<u8>> = Vec::new();
     let mut handler_thread_handles = Vec::new();
     let mut send_term_signal = false;
     let mut soft_term = true;
     'main_loop: loop {
         if send_term_signal {
             if soft_term {
-                for handler_thread_inst_sender in handler_thread_inst_senders.iter() {
+                for (i, handler_thread_inst_sender) in handler_thread_inst_senders.iter()
+                    .enumerate() {
                     handler_thread_inst_sender.send(3).unwrap();
                 }
                 println!("Sent soft terminate signal to all TCP handler threads.");
@@ -284,9 +287,10 @@ fn main() {
                 _ => {}
             }
         }
-        for (i, connected_tf) in still_connected.into_iter().enumerate() {
-            if !connected_tf {
-                tcpstreams.remove(i);
+        for i in 0..handler_thread_inst_senders.len() {
+            if handler_thread_inst_senders[i].send(10).is_err() {
+                handler_thread_handles.remove(i);
+                handler_thread_inst_senders.remove(i);
             }
         }
     }
