@@ -6,7 +6,7 @@ use std::mem::transmute_copy;
 use std::time::Duration;
 
 const MAX_X: u64 = 1000;
-const NUM_THREADS: usize = 4;
+const NUM_THREADS: usize = 2;
 
 fn pause_thread(tcp_stream: &mut TcpStream, x: u64, y: u64, z: u64) {
     'pause: loop {
@@ -32,6 +32,8 @@ fn pause_thread(tcp_stream: &mut TcpStream, x: u64, y: u64, z: u64) {
                         break 'pause;
                     }
                 }
+            } else if recv_type[0] as char == 'h' {
+                drop(tcp_stream.write_all(&['h' as u8; 1]));
             }
         }
     }
@@ -46,212 +48,70 @@ fn send_xyz(tcp_stream: &mut TcpStream, xyz: [u64; 3]) {
     drop(tcp_stream.write_all(&xyz_bytes));
 }
 
-// Deep breaths. Deep breaths. I know this is deeply wrong, but please bear with me. I need limited
-// recursion, which is something I can't achieve with normal macros and just, say, a "recursion
-// counter" variable that gets passed in as an identifier. So, I forced "identifiers" by having a
-// linear progression through a list of macros with a given "label" at the start, like 'a', 'b', or
-// 'c', where macro!(a, other_args) calls macro!(b, other_args) in the case where macro!() would
-// recurse, and macro!(b, other_args) calls macro!(c, other_args) in the same case. However, in
-// this case, 'c' is the last "label" in the series, so any case where macro!() would recurse
-// results in a panic. This macro provides a way of generating that "limited recursion." In the
-// case of how I've used it, sorta_recursive_get_x!(a, other_args) is the entry point for the
-// limited recursion I need to get an x value after a data request in the case that the host sends
-// a command after the data request is sent and before the data is received by the client.
-macro_rules! gen_sorta_recursive_get_x_macro {
-    ($($start_label:tt => $points_to:tt),*; $last_label:tt) => {
-        macro_rules! sorta_recursive_get_x {
-            $(
-            ($start_label $tcp_strm:ident, $wus:ident, $cno:ident, $ml:tt) => {
-                {
-                    let mut recv_response: [u8; 1] = [0];
-                    drop($tcp_strm.read_exact(&mut recv_response));
-                    let recv_response = recv_response[0] as char;
-                    match recv_response {
-                        'h' => { // Heartbeat
-                            drop($tcp_strm.write_all(&['h' as u8; 1]));
-                            sorta_recursive_get_x!($points_to $tcp_strm, $wus, $cno, $ml)
-                        },
-                        'x' => { // New x value
-                            let mut tcp_recv_bytes: [u8; 8] = [0; 8];
-                            $tcp_strm.read_exact(&mut tcp_recv_bytes)
-                                .expect("Was unable to read from TCP stream.");
-                            unsafe {
-                                transmute_copy::<[u8; 8], u64>(&tcp_recv_bytes)
-                            }
-                        },
-                        't' => { // Terminate
-                            let mut next_byte: [u8; 1] = [0];
-                            drop($tcp_strm.read_exact(&mut next_byte));
-                            if next_byte[0] as char == 'f' { // Iterator finished!
-                                println!("({}) Host iterator finished! Exiting.", $cno);
-                            } else {
-                                println!("({}) Got unexpected terminate signal. Exiting.",
-                                    $cno);
-                            }
-                            drop($tcp_strm.write_all(&['t' as u8; 1]));
-                            $wus.send(()).unwrap();
-                            break $ml;
-                        },
-                        'c' => {
-                            let mut command_type: [u8; 1] = [0];
-                            drop($tcp_strm.read_exact(&mut command_type));
-                            match command_type[0] {
-                                0 => {
-                                    send_xyz(&mut $tcp_strm, ['e' as u64, 'r' as u64,
-                                        'r' as u64]);
-                                    sorta_recursive_get_x!($points_to $tcp_strm, $wus, $cno, $ml)
-                                },
-                                1 => {
-                                    pause_thread(&mut $tcp_strm, 'e' as u64, 'r' as u64,
-                                        'r' as u64);
-                                    sorta_recursive_get_x!($points_to $tcp_strm, $wus, $cno, $ml)
-                                },
-                                2 => sorta_recursive_get_x!($points_to $tcp_strm, $wus, $cno, $ml),
-                                n @ _ => panic!(format!("({}) Got 'c {}'. Wotfok?", $cno, n))
-                            }
-                        },
-                        n @ _ => panic!(format!("({}) Got incoming data indicator: {}.\
-                        Networking's totally fucked :^)",
-                                                $cno, n))
-                    }
-                }
-            };
-            )*
-            ($last_label $tcp_strm:ident, $wus:ident, $cno:ident, $ml:tt) => {
-                {
-                    let mut recv_response: [u8; 1] = [0];
-                    drop($tcp_strm.read_exact(&mut recv_response));
-                    let recv_response = recv_response[0] as char;
-                    match recv_response {
-                        'h' => { // Heartbeat
-                            drop($tcp_strm.write_all(&['t' as u8; 1]));
-                            panic!(format!("({}) 'get_x!' recursion limit reached!", $cno));
-                        },
-                        'x' => { // New x value
-                            let mut tcp_recv_bytes: [u8; 8] = [0; 8];
-                            $tcp_strm.read_exact(&mut tcp_recv_bytes)
-                                .expect("Was unable to read from TCP stream.");
-                            unsafe {
-                                transmute_copy::<[u8; 8], u64>(&tcp_recv_bytes)
-                            }
-                        },
-                        't' => { // Terminate
-                            let mut next_byte: [u8; 1] = [0];
-                            drop($tcp_strm.read_exact(&mut next_byte));
-                            if next_byte[0] as char == 'f' { // Iterator finished!
-                                println!("({}) Host iterator finished! Exiting.", $cno);
-                            } else {
-                                println!("({}) Got unexpected terminate signal. Exiting.",
-                                    $cno);
-                            }
-                            drop($tcp_strm.write_all(&['t' as u8; 1]));
-                            $wus.send(()).unwrap();
-                            break $ml;
-                        },
-                        'c' => {
-                            let mut command_type: [u8; 1] = [0];
-                            drop($tcp_strm.read_exact(&mut command_type));
-                            match command_type[0] {
-                                0 => {
-                                    drop($tcp_strm.write_all(&['t' as u8; 1]));
-                                    $wus.send(()).unwrap();
-                                    panic!(format!("({}) 'get_x!' recursion limit reached!", $cno));
-                                },
-                                1 => {
-                                    drop($tcp_strm.write_all(&['t' as u8; 1]));
-                                    $wus.send(()).unwrap();
-                                    panic!(format!("({}) 'get_x!' recursion limit reached!", $cno));
-                                },
-                                2 => {
-                                    drop($tcp_strm.write_all(&['t' as u8; 1]));
-                                    $wus.send(()).unwrap();
-                                    panic!(format!("({}) 'get_x!' recursion limit reached!", $cno));
-                                },
-                                n @ _ => {
-                                    $wus.send(()).unwrap();
-                                    panic!(format!("({}) Got 'c {}'. Wotfok?", $cno, n));
-                                }
-                            }
-                        },
-                        n @ _ => panic!(format!("({}) Got incoming data indicator: {}.\
-                        Networking's totally fucked :^)",
-                                                $cno, n))
-                    }
-                }
-            }
-        }
-    };
-}
+const RECURSION_LIMIT: u8 = 5;
 
-gen_sorta_recursive_get_x_macro!{
-    a => b,
-    b => c,
-    c => d;
-    d
-}
-
-// Feel free to take a deep breath and prepare for disappointment.
-macro_rules! get_x {
-    ($tcp_stream:ident, $wrap_up_sender:ident, $c_no:ident, $main_loop:tt) => {
-        {
-            // Write 't' to the TCP stream to request work
-            drop($tcp_stream.write_all(&['r' as u8; 1]));
-            // Get response
-            let mut recv_response: [u8; 1] = [0];
-            drop($tcp_stream.read_exact(&mut recv_response));
-            let recv_response = recv_response[0] as char;
-            match recv_response {
-                'h' => {
-                    drop($tcp_stream.write_all(['h' as u8; 1]));
-                    sorta_recursive_get_x!(a $tcp_stream, $wrap_up_sender, $c_no, $main_loop)
-                }
-                'x' => { // New x value
-                    let mut tcp_recv_bytes: [u8; 8] = [0; 8];
-                    $tcp_stream.read_exact(&mut tcp_recv_bytes)
-                        .expect("Was unable to read from TCP stream.");
-                    unsafe {
-                        transmute_copy::<[u8; 8], u64>(&tcp_recv_bytes)
-                    }
-                },
-                't' => { // Terminate
-                    let mut next_byte: [u8; 1] = [0];
-                    drop($tcp_stream.read_exact(&mut next_byte));
-                    if next_byte[0] as char == 'f' { // Iterator finished!
-                        println!("({}) Host iterator finished! Closing thread.", $c_no);
-                    } else {
-                        println!("({}) Got unexpected terminate signal. Closing thread.", $c_no);
-                    }
-                    $wrap_up_sender.send(()).unwrap();
-                    break $main_loop;
-                },
-                'c' => {
-                    let mut command_type: [u8; 1] = [0];
-                    drop($tcp_stream.read_exact(&mut command_type));
-                    // Explanation for recursive macro calls in the following match block:
-                    // The host may send any number of commands, followed by the response to the
-                    // data request. So, I need to make sure that the data is caught WITHOUT sending
-                    // more data requests. Hence the existence of the "nosend" branch of this macro.
-                    match command_type[0] {
-                        0 => {
-                            send_xyz(&mut $tcp_stream, ['e' as u64, 'r' as u64, 'r' as u64]);
-                            sorta_recursive_get_x!(a $tcp_stream, $wrap_up_sender, $c_no,
-                                $main_loop)
-                        },
-                        1 => {
-                            pause_thread(&mut $tcp_stream, 'e' as u64, 'r' as u64, 'r' as u64);
-                            sorta_recursive_get_x!(a $tcp_stream, $wrap_up_sender, $c_no,
-                                $main_loop)
-                        },
-                        2 => sorta_recursive_get_x!(a $tcp_stream, $wrap_up_sender, $c_no,
-                                $main_loop),
-                        n @ _ => panic!(format!("({}) Got 'c {}'. Wotfok?", $c_no, n))
-                    }
-                },
-                n @ _ => panic!(format!("({}) Got incoming data indicator: {}. RIP networking.",
-                                        $c_no, n))
+fn get_x_limited_recursion(tcp_stream: &mut TcpStream, wrap_up_sender: &Sender<()>, c_no: usize,
+    recursion_count: u8) -> Result<u64, bool> {
+    if recursion_count < RECURSION_LIMIT {
+        // Write 't' to the TCP stream to request work
+        drop(tcp_stream.write_all(&['r' as u8; 1]));
+        // Get response
+        let mut recv_response: [u8; 1] = [0];
+        drop(tcp_stream.read_exact(&mut recv_response));
+        let recv_response = recv_response[0] as char;
+        match recv_response {
+            'h' => {
+                drop(tcp_stream.write_all(&['h' as u8; 1]));
+                get_x_limited_recursion(tcp_stream, wrap_up_sender, c_no, recursion_count + 1)
             }
+            'x' => { // New x value
+                let mut tcp_recv_bytes: [u8; 8] = [0; 8];
+                tcp_stream.read_exact(&mut tcp_recv_bytes)
+                    .expect("Was unable to read from TCP stream.");
+                unsafe {
+                    Ok(transmute_copy::<[u8; 8], u64>(&tcp_recv_bytes))
+                }
+            },
+            't' => { // Terminate
+                let mut next_byte: [u8; 1] = [0];
+                drop(tcp_stream.read_exact(&mut next_byte));
+                if next_byte[0] as char == 'f' { // Iterator finished!
+                    println!("({}) Host iterator finished! Closing thread.", c_no);
+                } else {
+                    println!("({}) Got unexpected terminate signal. Closing thread.", c_no);
+                }
+                wrap_up_sender.send(()).unwrap();
+                Err(true)
+            },
+            'c' => {
+                let mut command_type: [u8; 1] = [0];
+                drop(tcp_stream.read_exact(&mut command_type));
+                // Explanation for recursive macro calls in the following match block:
+                // The host may send any number of commands, followed by the response to the
+                // data request. So, I need to make sure that the data is caught WITHOUT sending
+                // more data requests. Hence the existence of the "nosend" branch of this macro.
+                match command_type[0] {
+                    0 => {
+                        send_xyz(tcp_stream, ['e' as u64, 'r' as u64, 'r' as u64]);
+                        get_x_limited_recursion(tcp_stream, wrap_up_sender, c_no,
+                            recursion_count + 1)
+                    },
+                    1 => {
+                        pause_thread(tcp_stream, 'e' as u64, 'r' as u64, 'r' as u64);
+                        get_x_limited_recursion(tcp_stream, wrap_up_sender, c_no,
+                            recursion_count + 1)
+                    },
+                    2 => get_x_limited_recursion(tcp_stream, wrap_up_sender, c_no,
+                            recursion_count + 1),
+                    n @ _ => panic!(format!("({}) Got 'c {}'. Wotfok?", c_no, n))
+                }
+            },
+            n @ _ => panic!(format!("({}) Got incoming data indicator: {}. RIP networking.",
+                                    c_no, n))
         }
-    };
+    } else {
+        panic!("({}) Recursion limit for getting new x value reached!", c_no);
+    }
 }
 
 fn spawn_tester_thread(tcp_addr: &'static str, wrap_up_sender: Sender<()>, c_no: usize) -> JoinHandle<()> {
@@ -267,7 +127,11 @@ fn spawn_tester_thread(tcp_addr: &'static str, wrap_up_sender: Sender<()>, c_no:
                 break 'main_loop;
             }
             // Get x value for testing
-            let x = get_x!(tcp_stream, wrap_up_sender, c_no, 'main_loop);
+            let x = match get_x_limited_recursion(&mut tcp_stream, &wrap_up_sender, c_no, 0) {
+                Ok(x) => x,
+                Err(false) => continue 'main_loop,
+                Err(true) => break 'main_loop
+            };
             for y in (2..x / 24).map(|y| y * 24) {
                 for z in (2..(x - y) / 24).map(|z| z * 24).take_while(|&z| z != y) {
                     if test_squares(x, y, z) {
@@ -285,6 +149,7 @@ fn spawn_tester_thread(tcp_addr: &'static str, wrap_up_sender: Sender<()>, c_no:
                             drop(tcp_stream.read_exact(&mut recv_type_byte));
                             recv_type_byte[0] as char
                         };
+                        println!("({}) Found type indicator on TCP stream... Got: {}", c_no, recv_type as char);
                         match recv_type {
                             'c' => { // Command. Will be 0, 1, or 2
                                 let mut command_type: [u8; 1] = [0];
@@ -323,7 +188,7 @@ fn spawn_tester_thread(tcp_addr: &'static str, wrap_up_sender: Sender<()>, c_no:
 
 fn main() {
     println!("Using maximum x value: {}", MAX_X);
-    let tcp_addr: &'static str = "169.254.36.152:1337";
+    let tcp_addr: &'static str = "127.0.0.1:1337";
     let mut wrap_up_receivers = Vec::new();
     let mut handles = Vec::new();
     for i in 0..NUM_THREADS {
