@@ -12,6 +12,12 @@ const PROGRESS: char = 'a';
 const REQUEST: char = 'r';
 const SOLUTION: char = 's';
 const TERMINATING: char = 't';
+const TERMINATE: char = 't';
+const SOFT: char = 's';
+const HARD: char = 'h';
+const FINISHED: char = 'f';
+const NEW_X: char = 'x';
+const COMMAND: char = 'c';
 
 // Management command values
 const PROGRESS_QUERY: u8 = 0;
@@ -160,14 +166,14 @@ fn spawn_handler_thread(c_no: usize, mut tcp_stream: TcpStream, manager_inst_rec
                                     x
                                 } else {
                                     // Write 't' to the TCP stream for "Terminate"
-                                    drop(tcp_stream.write_all(&['t' as u8; 1]));
+                                    drop(tcp_stream.write_all(&[TERMINATE as u8; 1]));
                                     // Write 'f' to the TCP stream for "iterator Finished"
-                                    drop(tcp_stream.write_all(&['f' as u8; 1]));
+                                    drop(tcp_stream.write_all(&[FINISHED as u8; 1]));
                                     break 'main_loop;
                                 }
                             };
                             // Write 'x' for new x
-                            drop(tcp_stream.write_all(&['x' as u8; 1]));
+                            drop(tcp_stream.write_all(&[NEW_X as u8; 1]));
                             // Get bytes for 'x'
                             let mut x_bytes = unsafe {
                                 transmute_copy::<u64, [u8; 8]>(&x)
@@ -205,24 +211,24 @@ fn spawn_handler_thread(c_no: usize, mut tcp_stream: TcpStream, manager_inst_rec
                 println!("({}) Got management instruction: {}", c_no, inst);
                 match inst {
                     PROGRESS_QUERY => { // Progress query
-                        drop(tcp_stream.write_all(&['c' as u8; 1]));
-                        drop(tcp_stream.write_all(&[0; 1]));
+                        drop(tcp_stream.write_all(&[COMMAND as u8; 1]));
+                        drop(tcp_stream.write_all(&[PROGRESS_QUERY; 1]));
                     },
                     PAUSE => { // Pause
-                        drop(tcp_stream.write_all(&['c' as u8; 1]));
-                        drop(tcp_stream.write_all(&[1; 1]));
+                        drop(tcp_stream.write_all(&[COMMAND as u8; 1]));
+                        drop(tcp_stream.write_all(&[PAUSE; 1]));
                     },
                     PLAY => { // Play
-                        drop(tcp_stream.write_all(&['c' as u8; 1]));
-                        drop(tcp_stream.write_all(&[2; 1]));
+                        drop(tcp_stream.write_all(&[COMMAND as u8; 1]));
+                        drop(tcp_stream.write_all(&[PLAY; 1]));
                     },
                     SOFT_TERMINATE => { // Soft terminate
-                        drop(tcp_stream.write_all(&['t' as u8; 1]));
-                        drop(tcp_stream.write_all(&['s' as u8; 1]));
+                        drop(tcp_stream.write_all(&[TERMINATE as u8; 1]));
+                        drop(tcp_stream.write_all(&[SOFT as u8; 1]));
                     },
                     HARD_TERMINATE => { // Hard terminate
-                        drop(tcp_stream.write_all(&['t' as u8; 1]));
-                        drop(tcp_stream.write_all(&['h' as u8; 1]));
+                        drop(tcp_stream.write_all(&[TERMINATE as u8; 1]));
+                        drop(tcp_stream.write_all(&[HARD as u8; 1]));
                     },
                     _ => {}
                 }
