@@ -35,3 +35,10 @@ To run this program, first open a terminal and do `cargo run --release --bin hos
 do `cargo run --release --bin client`. Unfortunately, the `--release` is not optional, since the
 `is_valid_square()` function in both the host and client make use of overflow as part of testing whether or
 not the input is a perfect square. This causes panics in debug builds.
+
+Other things:
+- the number of threads spawned by each client is a `const` value in  
+`client.rs`. Feel free to change this to suit whatever machine you're 
+running on.
+- The maximum `X` value is a `const` value in `host.rs`. Feel free to 
+change this to suit whatever you want. [DWTFYW license pending?]

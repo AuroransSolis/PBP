@@ -6,7 +6,7 @@ use std::thread;
 use std::io::ErrorKind::{WouldBlock};
 use std::time::Instant;
 
-const MAX_X: u64 = 1000;
+const MAX_X: u64 = 600;
 const TRY_RECV_DATA_TIMEOUT: u64 = 5;
 
 const PROGRESS: char = 'a';

@@ -5,7 +5,7 @@ use std::net::TcpStream;
 use std::mem::transmute_copy;
 
 const MAX_X: u64 = 1000;
-const NUM_THREADS: usize = 4;
+const NUM_THREADS: usize = 2;
 
 const COMMAND: char = 'c';
 const PROGRESS_QUERY: u8 = 0;
