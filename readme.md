@@ -31,7 +31,7 @@ you want to find out more about this problem.
 An explanation of what I'm trying to get this program to do can be found in `PBP explanation.txt`. That is
 how I want this program to function, but it is not how it is functioning currently.
 
-To run this program, first open a terminal and do `cargo run --release --bin host`, then `cargo run --release --bin client`.
-Unfortunately, the `--release` is not optional, since the `is_valid_square()` function in both the host and client
-make use of overflow as part of testing whether or not the input is a perfect square. This causes panics in debug
-builds.
+To run this program, first open a terminal and do `cargo run --release --bin host`, then open another and
+do `cargo run --release --bin client`. Unfortunately, the `--release` is not optional, since the
+`is_valid_square()` function in both the host and client make use of overflow as part of testing whether or
+not the input is a perfect square. This causes panics in debug builds.
