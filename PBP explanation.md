@@ -8,13 +8,14 @@ like this:
     - if PROGRESS_QUERY (0), send PROGRESS_QUERY (0) to all TCP handlers
     - if PAUSE (1), send PAUSE (1) to all TCP handlers
     - if PLAY (2), send PLAY (2) to all TCP handlers
-    - if SOFT_TERM (3), send SOFT_TERM (3) to all TCP handlers (finish all testing for current x value, then quit)
+    - if SOFT_TERM (3), send SOFT_TERM (3) to all TCP handlers (finish all testing for current x value,
+          then quit)
     - if HARD_TERM (4), send HARD_TERM (4) to all TCP handlers (quit immediately)
     - if NUM_CONNECTIONS (5), print number of TCP handlers
     - ignore anything else
 - check to see if any receivers for TCP handlers have been dropped
-- repeat all of the above until all TCP handlers have completed execution, or until qs is entered and current x values have
-      been tested, or until qf is entered
+- repeat all of the above until all TCP handlers have completed execution, or until qs is entered and current
+      x values have been tested, or until qf is entered
 ```
 
 main's IO manager should have something like this (spawned with 'spawn_io_manager()'):
@@ -80,17 +81,20 @@ Each TCP handler's task list should look like this:
         - write REQUEST ('r') to host to request data
         - read next byte off of TCP stream
         - match byte (casted to a char)
-            - if INCOMING_X ('x'), the next 8 bytes are the x value. Transmute them to a u64, and continue to testing
-            - if HEARTBEAT ('h'), respond with HEARTBEAT ('h'). This is the heartbeat. Repeat getting the X value
+            - if INCOMING_X ('x'), the next 8 bytes are the x value. Transmute them to a u64, and continue to
+                  testing
+            - if HEARTBEAT ('h'), respond with HEARTBEAT ('h'). This is the heartbeat. Repeat getting the X
+                  value
             - if TERMINATE ('t'), break main loop
             - if COMMAND ('c'), match next byte
-                - if PROGRESS_QUERY (0), the client has received a progress query. Since the client has no X, Y, or Z value,
-                      send ['e' as u64, 'r' as u64, 'r' as u64] back
+                - if PROGRESS_QUERY (0), the client has received a progress query. Since the client has no X,
+                      Y, or Z value, send ['e' as u64, 'r' as u64, 'r' as u64] back
                 - if PAUSE (1), the client has received a pause command. Pause loop:
                     - match next byte on the stream
                         - if HEARTBEAT ('h'), send HEARTBEAT ('h') back (heartbeat)
                         - if TERMINATE ('t'), break main loop
-                        - if INCOMING_X ('x'), store new x value until done and return when pause loop is broken
+                        - if INCOMING_X ('x'), store new x value until done and return when pause loop is
+                              broken
                         - if COMMAND ('c'), match next byte
                             - if PROGRESS_QUERY (0), send ['e' as u64, 'r' as u64, 'r' as u64] back
                             - if PAUSE (1), ignore
