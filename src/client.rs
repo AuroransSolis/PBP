@@ -3,7 +3,6 @@ use std::thread::{self, JoinHandle};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::mem::transmute_copy;
-use std::time::Duration;
 
 const MAX_X: u64 = 1000;
 const NUM_THREADS: usize = 4;
@@ -30,6 +29,7 @@ const SOLUTION: char = 's';
 
 fn pause_thread(tcp_stream: &mut TcpStream, x: u64, y: u64, z: u64) -> Result<Option<u64>, u8> {
     let mut got_x = None;
+    tcp_stream.set_nonblocking(false).expect("Was unable to set TCP stream as blocking for PAUSE.");
     'pause: loop {
         let mut recv_type: [u8; 1] = [0];
         drop(tcp_stream.read_exact(&mut recv_type));
@@ -95,10 +95,13 @@ fn get_x_limited_recursion(tcp_stream: &mut TcpStream, wrap_up_sender: &Sender<(
         let recv_response = recv_response[0] as char;
         match recv_response {
             HEARTBEAT => {
-                drop(tcp_stream.write_all(&[HEARTBEAT as u8; 1]));
+                // In the case that the client receives a heartbeat request after a data request,
+                // the host ends up using the data request as the heartbeat response. Send another
+                // data request to rectify the situation.
+                drop(tcp_stream.write_all(&[REQUEST as u8; 1]));
                 get_x_limited_recursion(tcp_stream, wrap_up_sender, c_no, recursion_count + 1)
-            }
-            INCOMING_X => { // New x value
+            },
+            INCOMING_X => {
                 let mut tcp_recv_bytes: [u8; 8] = [0; 8];
                 tcp_stream.read_exact(&mut tcp_recv_bytes)
                     .expect("Was unable to read from TCP stream.");
@@ -106,7 +109,7 @@ fn get_x_limited_recursion(tcp_stream: &mut TcpStream, wrap_up_sender: &Sender<(
                     Ok(transmute_copy::<[u8; 8], u64>(&tcp_recv_bytes))
                 }
             },
-            TERMINATE => { // Terminate
+            TERMINATE => {
                 let mut next_byte: [u8; 1] = [0];
                 drop(tcp_stream.read_exact(&mut next_byte));
                 if next_byte[0] as char == FINISHED { // Iterator finished!
@@ -143,34 +146,33 @@ fn get_x_limited_recursion(tcp_stream: &mut TcpStream, wrap_up_sender: &Sender<(
                     n @ _ => panic!(format!("({}) Got 'c {}'. Wotfok?", c_no, n))
                 }
             },
-            n @ _ => panic!(format!("({}) Got incoming data indicator: '{}' ({}). RIP networking.",
-                                    c_no, n, n as u8))
+            _ => get_x_limited_recursion(tcp_stream, wrap_up_sender, c_no, recursion_count + 1)
         }
     } else {
-        panic!("({}) Recursion limit for getting new x value reached!", c_no);
+        panic!("({} get x) Recursion limit for getting new x value reached!", c_no);
     }
 }
 
 fn spawn_tester_thread(tcp_addr: &'static str, wrap_up_sender: Sender<()>, c_no: usize) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut tcp_stream = TcpStream::connect(tcp_addr).unwrap();
-        tcp_stream.set_read_timeout(Some(Duration::from_millis(5000))).expect("Was unable to \
-            set read timeout.");
-        //tcp_stream.set_nonblocking(true).expect("Couldn't set TCP stream as nonblocking.");
-        println!("({}: ml) Connected to host!", c_no);
+        println!("({}) Connected to host!", c_no);
         let mut soft_term = false;
         'main_loop: loop {
             if soft_term {
                 break 'main_loop;
             }
             // Get x value for testing
-            println!("({}: ml) Sending data request.", c_no);
             drop(tcp_stream.write_all(&[REQUEST as u8; 1]));
+            tcp_stream.set_nonblocking(false).expect("Couldn't set TCP stream as nonblocking \
+            before getting X value.");
             let x = match get_x_limited_recursion(&mut tcp_stream, &wrap_up_sender, c_no, 0) {
                 Ok(x) => x,
                 Err(()) => break 'main_loop
             };
-            println!("({}: ml) got X value! {}", c_no, x);
+            //println!("got x");
+            tcp_stream.set_nonblocking(true).expect("Couldn't set TCP stream as nonblocking \
+            before beginning XYZ testing.");
             for y in (2..x / 24).map(|y| y * 24) {
                 for z in (2..(x - y) / 24).map(|z| z * 24).take_while(|&z| z != y) {
                     if test_squares(x, y, z) {
@@ -181,66 +183,61 @@ fn spawn_tester_thread(tcp_addr: &'static str, wrap_up_sender: Sender<()>, c_no:
                         drop(tcp_stream.write_all(&xyz_bytes));
                     }
                     // If there's bytes to read on the TCP stream...
-                    if tcp_stream.peek(&mut [0u8]).is_ok() {
-                        // Assign the first byte here
-                        let recv_type = {
-                            let mut recv_type_byte: [u8; 1] = [0];
-                            drop(tcp_stream.read_exact(&mut recv_type_byte));
-                            recv_type_byte[0] as char
-                        };
-                        println!("({}) Found type indicator on TCP stream... Got: {}", c_no, recv_type as char);
-                        match recv_type {
-                            COMMAND => { // Command. Will be 0, 1, or 2
-                                let mut command_type: [u8; 1] = [0];
-                                drop(tcp_stream.read_exact(&mut command_type));
-                                match command_type[0] {
-                                    PROGRESS_QUERY => send_xyz(&mut tcp_stream, [x, y, z]),
-                                    PAUSE => {
-                                        let pause_result = pause_thread(&mut tcp_stream, x, y, z);
-                                        if let Err(ty) = pause_result {
-                                            match ty {
-                                                SOFT_VAL => soft_term = true,
-                                                HARD_VAL => break 'main_loop,
-                                                FINISHED_VAL => soft_term = true,
-                                                _ => {}
-                                            }
+                    let recv_type = {
+                        let mut recv_type_byte: [u8; 1] = [0];
+                        drop(tcp_stream.read_exact(&mut recv_type_byte));
+                        recv_type_byte[0] as char
+                    };
+                    match recv_type {
+                        HEARTBEAT => drop(tcp_stream.write_all(&[HEARTBEAT as u8; 1])),
+                        COMMAND => {
+                            let mut command_type: [u8; 1] = [0];
+                            drop(tcp_stream.read_exact(&mut command_type));
+                            match command_type[0] {
+                                PROGRESS_QUERY => send_xyz(&mut tcp_stream, [x, y, z]),
+                                PAUSE => {
+                                    let pause_result = pause_thread(&mut tcp_stream, x, y, z);
+                                    if let Err(ty) = pause_result {
+                                        match ty {
+                                            SOFT_VAL => soft_term = true,
+                                            HARD_VAL => break 'main_loop,
+                                            FINISHED_VAL => soft_term = true,
+                                            _ => {}
                                         }
-                                    },
-                                    _ => {}
-                                }
+                                    }
+                                },
+                                _ => {}
                             }
-                            TERMINATE => {
-                                let mut term_type: [u8; 1] = [0];
-                                drop(tcp_stream.read_exact(&mut term_type));
-                                match term_type[0] as char {
-                                    SOFT => {
-                                        println!("({}) Got soft terminate signal from host.", c_no);
-                                        soft_term = true;
-                                    },
-                                    HARD => {
-                                        println!("({}) Got hard terminate signal from host.", c_no);
-                                        wrap_up_sender.send(()).unwrap();
-                                        break 'main_loop;
-                                    },
-                                    _ => {}
-                                }
-                            },
-                            HEARTBEAT => {
-                                drop(tcp_stream.write_all(&[HEARTBEAT as u8; 1]));
-                            }
-                            _ => {}
                         }
+                        TERMINATE => {
+                            println!("({}) Got terminate signal from host.", c_no);
+                            let mut term_type: [u8; 1] = [0];
+                            drop(tcp_stream.read_exact(&mut term_type));
+                            match term_type[0] as char {
+                                SOFT => {
+                                    println!("({}) Terminate signal type: SOFT.", c_no);
+                                    soft_term = true;
+                                },
+                                HARD => {
+                                    println!("({}) Terminate signal type: HARD.", c_no);
+                                    wrap_up_sender.send(()).unwrap();
+                                    break 'main_loop;
+                                },
+                                _ => {}
+                            }
+                        },
+                        _ => {}
                     }
                 }
             }
-            println!("({}: ml) Finished testing X value. {}", c_no, x);
         }
+        drop(tcp_stream.write_all(&[TERMINATE as u8; 1]));
         println!("({}) Finishing execution!", c_no);
     })
 }
 
 fn main() {
-    println!("Using maximum x value: {}", MAX_X);
+    println!("Using maximum x value: {}", MAX_X * MAX_X);
     let tcp_addr: &'static str = "127.0.0.1:1337";
     let mut wrap_up_receivers = Vec::new();
     let mut handles = Vec::new();

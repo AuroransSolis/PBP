@@ -2,9 +2,9 @@ use std::io::{Read, prelude::*, stdout, stdin};
 use std::net::{TcpListener, TcpStream};
 use std::mem::transmute_copy;
 use std::sync::{mpsc::{channel, Sender, Receiver}, Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::io::ErrorKind::{WouldBlock};
-use std::time::{SystemTime, Instant};
+use std::time::Instant;
 
 const MAX_X: u64 = 1000;
 const TRY_RECV_DATA_TIMEOUT: u64 = 5;
@@ -38,24 +38,18 @@ fn spawn_io_manager(inst_sender: Sender<u8>) {
             match input_buffer.as_str() {
                 "qs" => {
                     inst_sender.send(SOFT_TERMINATE).unwrap();
-                    println!("Sent terminate signal to main thread.");
-                    break 'io_management;
                 },
                 "qp" => {
                     inst_sender.send(PROGRESS_QUERY).unwrap();
-                    println!("Sent progress query signal to main thread.");
                 },
                 "pause" => {
                     inst_sender.send(PAUSE).unwrap();
-                    println!("Sent pause signal to main thread.");
                 },
                 "play" => {
                     inst_sender.send(PLAY).unwrap();
-                    println!("Sent play signal to main thread.");
                 },
                 "nc" => {
                     inst_sender.send(NUM_CONNECTIONS).unwrap();
-                    println!("Sent query about number of connections to main thread.");
                 },
                 "qf" => {
                     inst_sender.send(HARD_TERMINATE).unwrap();
@@ -88,7 +82,6 @@ const HEARTBEAT_CHAR: char = 'h';
 
 fn heartbeat(tcp_stream: &mut TcpStream, c_no: usize) -> bool {
     drop(tcp_stream.write_all(&[HEARTBEAT_CHAR as u8; 1]));
-    println!("({}) Sent heartbeat to client.", c_no);
     let mut response: [u8; 1] = [0];
     tcp_stream.set_read_timeout(Some(std::time::Duration::from_secs(HEARTBEAT_TIMEOUT)))
         .expect(format!("Was unable to set client ({:?}) read timeout for heartbeat",
@@ -97,7 +90,8 @@ fn heartbeat(tcp_stream: &mut TcpStream, c_no: usize) -> bool {
         Ok(_) => {
             tcp_stream.set_read_timeout(None).expect(format!("Was unable to reset client ({:?}) \
             read timeout after heartbeat", tcp_stream.peer_addr()).as_str());
-            println!("({}) Heartbeat successful! Response: '{}'", c_no, response[0] as char);
+            tcp_stream.set_nonblocking(true).expect("Unable to reset TCP stream to \
+            nonblocking.");
             true
         },
         Err(_) => {
@@ -111,31 +105,54 @@ fn heartbeat(tcp_stream: &mut TcpStream, c_no: usize) -> bool {
 
 fn spawn_handler_thread(c_no: usize, mut tcp_stream: TcpStream, manager_inst_recv: Receiver<u8>,
                         arc_mut_iter: Arc<Mutex<Iterator<Item = u64> + Send + 'static>>,
-                        _manager_heartbeat_recv: Receiver<()>)
-    -> JoinHandle<()> {
+                        manager_heartbeat_recv: Receiver<()>) {
     println!("({}) Started handler!", c_no);
     thread::spawn(move || {
         let total_timer = Instant::now();
         let mut timer = Instant::now();
         'main_loop: loop {
+            drop(manager_heartbeat_recv.try_recv());
+            tcp_stream.set_nonblocking(false).expect("Unable to set TCP stream to blocking \
+            for heartbeat.");
             if timer.elapsed().as_secs() > HEARTBEAT_TIMER {
-                println!("({}) Sending heartbeat to client.", c_no);
                 if !heartbeat(&mut tcp_stream, c_no) {
                     break 'main_loop;
                 }
                 timer = Instant::now();
             }
+            tcp_stream.set_nonblocking(true).expect("Unable to reset TCP stream to \
+            nonblocking.");
+            if let Ok(inst) = manager_inst_recv.try_recv() {
+                match inst {
+                    PROGRESS_QUERY => {
+                        drop(tcp_stream.write_all(&[COMMAND as u8; 1]));
+                        drop(tcp_stream.write_all(&[PROGRESS_QUERY; 1]));
+                    },
+                    PAUSE => {
+                        drop(tcp_stream.write_all(&[COMMAND as u8; 1]));
+                        drop(tcp_stream.write_all(&[PAUSE; 1]));
+                    },
+                    PLAY => {
+                        drop(tcp_stream.write_all(&[COMMAND as u8; 1]));
+                        drop(tcp_stream.write_all(&[PLAY; 1]));
+                    },
+                    SOFT_TERMINATE => {
+                        drop(tcp_stream.write_all(&[TERMINATE as u8; 1]));
+                        drop(tcp_stream.write_all(&[SOFT as u8; 1]));
+                    },
+                    HARD_TERMINATE => {
+                        drop(tcp_stream.write_all(&[TERMINATE as u8; 1]));
+                        drop(tcp_stream.write_all(&[HARD as u8; 1]));
+                    },
+                    _ => {}
+                }
+            }
             // Handle receiving instructions from the TCP stream
             let mut recv_instr_byte: [u8; 1] = [0];
-            if let Err(e) = tcp_stream.read_exact(&mut recv_instr_byte) {
-                if e.kind() != WouldBlock {
-                    println!("TCP stream {} disconnected.", c_no);
-                    break 'main_loop;
-                }
+            if tcp_stream.read_exact(&mut recv_instr_byte).is_err() {
                 continue 'main_loop;
             }
             let instr = recv_instr_byte[0] as char;
-            println!("({}) Got type indicator from client: '{}'", c_no, instr);
             match instr {
                 PROGRESS => {
                     let mut recv_at_bytes: [u8; 24] = [0; 24];
@@ -157,7 +174,8 @@ fn spawn_handler_thread(c_no: usize, mut tcp_stream: TcpStream, manager_inst_rec
                         println!("({}) Error receiving progress - no current x value.", c_no);
                     } else {
                         println!("({}) progress at {:?} | x: {}, y: {}, z: {}", c_no,
-                                 timer.elapsed(), recv_at_xyz[0], recv_at_xyz[1], recv_at_xyz[2]);
+                                 total_timer.elapsed(), recv_at_xyz[0], recv_at_xyz[1],
+                                 recv_at_xyz[2]);
                     }
                 },
                 REQUEST => {
@@ -168,24 +186,19 @@ fn spawn_handler_thread(c_no: usize, mut tcp_stream: TcpStream, manager_inst_rec
                         if let Some(x) = iterator.next() {
                             x
                         } else {
-                            // Write 't' to the TCP stream for "Terminate"
                             drop(tcp_stream.write_all(&[TERMINATE as u8; 1]));
-                            // Write 'f' to the TCP stream for "iterator Finished"
                             drop(tcp_stream.write_all(&[FINISHED as u8; 1]));
                             break 'main_loop;
                         }
                     };
-                    // Write 'x' for new x
+                    //println!("Writing 'x' to stream.");
                     drop(tcp_stream.write_all(&[NEW_X as u8; 1]));
                     // Get bytes for 'x'
                     let mut x_bytes = unsafe {
                         transmute_copy::<u64, [u8; 8]>(&x)
                     };
-                    let mut x_bytes_string = x_bytes.iter().map(|b| format!("{:08b}", b)).fold("".to_string(), |r, b| format!("{}{}, ", r, b));
-                    drop(x_bytes_string.pop());
-                    drop(x_bytes_string.pop());
-                    println!("({}) Sending bytes in response to data request: [{}] ({})", c_no, x_bytes_string, x);
                     // Write bytes for 'x'
+                    //println!("Writing x bytes to stream.");
                     drop(tcp_stream.write_all(&x_bytes));
                 },
                 SOLUTION => {
@@ -207,43 +220,13 @@ fn spawn_handler_thread(c_no: usize, mut tcp_stream: TcpStream, manager_inst_rec
                     }
                 },
                 TERMINATING => {
-                    // Shutdown TCP stream.
                     break 'main_loop;
                 },
-                _ => {}
-            }
-            println!("({}) Checking for management instruction.", c_no);
-            if let Ok(inst) = manager_inst_recv.try_recv() {
-                println!("({}) Got management instruction: {}", c_no, inst);
-                match inst {
-                    PROGRESS_QUERY => { // Progress query
-                        drop(tcp_stream.write_all(&[COMMAND as u8; 1]));
-                        drop(tcp_stream.write_all(&[PROGRESS_QUERY; 1]));
-                    },
-                    PAUSE => { // Pause
-                        drop(tcp_stream.write_all(&[COMMAND as u8; 1]));
-                        drop(tcp_stream.write_all(&[PAUSE; 1]));
-                    },
-                    PLAY => { // Play
-                        drop(tcp_stream.write_all(&[COMMAND as u8; 1]));
-                        drop(tcp_stream.write_all(&[PLAY; 1]));
-                    },
-                    SOFT_TERMINATE => { // Soft terminate
-                        drop(tcp_stream.write_all(&[TERMINATE as u8; 1]));
-                        drop(tcp_stream.write_all(&[SOFT as u8; 1]));
-                    },
-                    HARD_TERMINATE => { // Hard terminate
-                        drop(tcp_stream.write_all(&[TERMINATE as u8; 1]));
-                        drop(tcp_stream.write_all(&[HARD as u8; 1]));
-                    },
-                    _ => {}
-                }
-            } else {
-                println!("({}) Found none.", c_no);
+                _ => continue 'main_loop
             }
         }
         println!("Client closing. Total runtime: {:?}", total_timer.elapsed());
-    })
+    });
 }
 
 fn main() {
@@ -256,18 +239,20 @@ fn main() {
     // a pain. So I'll just ignore joining it.
     spawn_io_manager(inst_sender);
     let mut handler_thread_inst_senders: Vec<Sender<u8>> = Vec::new();
-    let mut handler_thread_handles = Vec::new();
     let mut handler_heartbeat_senders = Vec::new();
+    let mut still_connected = Vec::new();
     let mut send_term_signal = false;
     let mut soft_term = true;
-    let mut client_number = 0;
+    let mut await_completion = false;
     'main_loop: loop {
         if send_term_signal {
             if soft_term {
                 for handler_thread_inst_sender in handler_thread_inst_senders.iter() {
                     handler_thread_inst_sender.send(SOFT_TERMINATE).unwrap();
                 }
+                await_completion = true;
                 println!("Sent soft terminate signal to all TCP handler threads.");
+                break 'main_loop;
             } else {
                 for handler_thread_inst_sender in handler_thread_inst_senders.iter() {
                     handler_thread_inst_sender.send(HARD_TERMINATE).unwrap();
@@ -275,76 +260,84 @@ fn main() {
                 break 'main_loop;
             }
         };
-        // Some major "WHAT THE FUCK" going on here. The host only ever gets 1 JoinHandle<()>.
         if let Ok((tcpstream, _)) = listener.accept() {
             println!("Accepted new connection! {:?}", tcpstream.peer_addr());
             let (handler_inst_send, handler_inst_recv): (Sender<u8>, Receiver<u8>) = channel();
             handler_thread_inst_senders.push(handler_inst_send);
             let (handler_heartbeat_s, handler_heartbeat_r): (Sender<()>, Receiver<()>) = channel();
             handler_heartbeat_senders.push(handler_heartbeat_s);
+            still_connected.push(true);
             let arc_pointer = Arc::clone(&iterator);
-            let tcp_handler = spawn_handler_thread(client_number, tcpstream, handler_inst_recv,
-                                                   arc_pointer, handler_heartbeat_r);
-            handler_thread_handles.push(tcp_handler);
-            client_number += 1;
-            println!("Number of connections: {}", handler_thread_handles.len());
+            spawn_handler_thread(handler_heartbeat_senders.len(), tcpstream, handler_inst_recv,
+                                 arc_pointer, handler_heartbeat_r);
         }
         // Check for instruction on the IO channel
         if let Ok(instr) = inst_receiver.try_recv() {
-            println!("(MAIN) got management instruction: {}", instr);
             match instr {
                 PROGRESS_QUERY => {
-                    // Try to write a progress query to all connected streams
                     for (i, handler_thread_inst_sender) in handler_thread_inst_senders.iter()
                         .enumerate() {
-                        // Pass on the '0' to the TCP stream handler threads.
                         if let Err(_) = handler_thread_inst_sender.send(PROGRESS_QUERY) {
+                            still_connected[i] = false;
                             println!("Client {} disconnected.", i);
                         }
                     }
-                    println!("Passed on progress query to all handler threads.");
                 },
                 PAUSE => {
                     for (i, handler_thread_inst_sender) in handler_thread_inst_senders.iter()
                         .enumerate() {
                         if let Err(_) = handler_thread_inst_sender.send(PAUSE) {
+                            still_connected[i] = false;
                             println!("Client {} disconnected.", i);
                         }
                     }
-                    println!("Passed on pause command to all handler threads.");
                 },
                 PLAY => {
                     for (i, handler_thread_inst_sender) in handler_thread_inst_senders.iter()
                         .enumerate() {
                         if let Err(_) = handler_thread_inst_sender.send(PLAY) {
+                            still_connected[i] = false;
                             println!("Client {} disconnected.", i);
                         }
                     }
-                    println!("Passed on play command to all handler threads.");
                 },
                 SOFT_TERMINATE => {
                     send_term_signal = true;
-                    println!("Set send_term_signal to true, set soft_term to true.");
                     continue 'main_loop;
                 },
                 NUM_CONNECTIONS => {
-                    println!("Current number of connections: {} ({:?})", handler_thread_handles.len(), handler_thread_handles);
+                    println!("Current number of connections: {}", handler_heartbeat_senders.len());
                 },
                 HARD_TERMINATE => {
                     send_term_signal = true;
                     soft_term = false;
-                    println!("Set send_term_signal to true, set soft_term to false.");
                     continue 'main_loop;
                 }
                 _ => {}
             }
         }
-        for i in 0..handler_heartbeat_senders.len() {
-            if handler_heartbeat_senders[i].send(()).is_err() {
+        for (i, hhs) in handler_heartbeat_senders.iter().enumerate() {
+            if hhs.send(()).is_err() {
                 println!("TCP handler {} dropped its heartbeat receiver; assuming thread closed.", i);
-                handler_thread_handles.remove(i);
-                handler_thread_inst_senders.remove(i);
-                handler_heartbeat_senders.remove(i);
+                still_connected[i] = false;
+            }
+        }
+        for (i, _) in still_connected.iter().rev().enumerate().filter(|&(_, &b)| !b) {
+            handler_heartbeat_senders.remove(i);
+            handler_thread_inst_senders.remove(i);
+        }
+        still_connected = still_connected.iter().map(|&b| b).filter(|&b| b).collect::<Vec<bool>>();
+    }
+    if await_completion {
+        'await_completion: loop {
+            let mut disconnected = 0;
+            for heartbeat_sender in & handler_heartbeat_senders {
+                if heartbeat_sender.send(()).is_err() {
+                    disconnected += 1;
+                }
+            }
+            if disconnected == handler_heartbeat_senders.len() {
+                break 'await_completion;
             }
         }
     }
