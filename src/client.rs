@@ -118,6 +118,7 @@ fn get_x_limited_recursion(tcp_stream: &mut TcpStream, wrap_up_sender: &Sender<(
                     println!("({}: gxlr) Got unexpected terminate signal. Closing thread.", c_no);
                 }
                 wrap_up_sender.send(()).unwrap();
+                drop(tcp_stream.write_all(&[TERMINATE as u8; 1]));
                 Err(())
             },
             COMMAND => {
